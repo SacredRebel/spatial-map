@@ -1,0 +1,31 @@
+# The world has to still be walkable after every change, so every push builds it and drives it in a
+# real browser against the fixture hillside. The suite needs no network and no atlas: the fixture
+# terrain and a stand-in registry are served locally, so a red run means this repo broke, never that
+# a deploy was mid-flight.
+name: build and walk
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: world-failure
+          path: dist
+          retention-days: 3
