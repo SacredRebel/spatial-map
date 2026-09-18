@@ -5,15 +5,23 @@
 //   to be somebody in it; first person on a key, because that is how you judge a doorway.
 //
 //   Collision against the hillside is a height query rather than a physics engine — the ground is
-//   a function, so standing on it is one lookup per frame instead of a broadphase. Buildings get
-//   real collision when they arrive; until then the ground is the world.
+//   a function, so standing on it is one lookup per frame instead of a broadphase. Buildings are
+//   prisms over their footprint and are resolved in the same step (see world/collide).
+//
+//   Movement arrives as an AXIS, not as keys. Keys set the axis, a thumbstick sets the axis, and a
+//   test sets the axis, so all three go through exactly the same arithmetic and a phone walks at
+//   the same speed as a keyboard.
 
 import * as THREE from 'three';
 import type { Frame } from '../world/geo';
 import type { HeightField } from '../world/heightfield';
+import type { Solid } from '../world/collide';
+import { resolve } from '../world/collide';
+import type { AvatarRig } from './avatar';
+import { CapsuleRig } from './avatar';
 
 const WALK = 1.6, RUN = 5.2, GRAVITY = -18, JUMP = 5.4;
-const EYE = 1.68, BODY = 1.8;
+const EYE = 1.68, BODY = 1.8, SHOULDER = 0.34;
 const LOOK = 0.0022, TOUCH_LOOK = 0.006;
 const PITCH_MIN = -1.15, PITCH_MAX = 0.9;
 const SUBSTEP = 1 / 20;            // the physics runs at 20 Hz however fast the page draws
@@ -23,40 +31,31 @@ export type View = 'third' | 'first';
 export interface PlayerState {
   lng: number; lat: number; groundM: number; headingDeg: number;
   speed: number; view: View; grounded: boolean;
-}
-
-/** a stand-in body: a capsule and a head, sized like a person, until a VRM avatar replaces it */
-function placeholderAvatar(): THREE.Group {
-  const g = new THREE.Group();
-  const skin = new THREE.MeshLambertMaterial({ color: '#d9b08c' });
-  const cloth = new THREE.MeshLambertMaterial({ color: '#3d6b52' });
-  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.26, 0.9, 6, 12), cloth);
-  body.position.y = 0.86;
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.155, 16, 12), skin);
-  head.position.y = 1.58;
-  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.12, 8), skin);
-  nose.position.set(0, 1.56, -0.16);
-  nose.rotation.x = -Math.PI / 2;
-  for (const m of [body, head, nose]) { m.castShadow = true; g.add(m); }
-  g.name = 'avatar';
-  return g;
+  /** the id of the building being leaned on, if any */
+  touching: string | null;
 }
 
 export class Player {
   readonly object = new THREE.Group();
-  readonly avatar = placeholderAvatar();
+  rig: AvatarRig = new CapsuleRig();
   view: View = 'third';
   camDist = 6.4;
+  /** buildings that stop you; set by main once the registry has loaded */
+  solids: Solid[] = [];
   private pos = new THREE.Vector3();
   private vel = new THREE.Vector3();
   private yaw = 0;
   private pitch = -0.26;
   private keys = new Set<string>();
+  private axis = { fwd: 0, side: 0, run: false };
   private grounded = true;
   private ground = 0;
   private locked = false;
   private dragging = false;
   private lastTouch: { x: number; y: number } | null = null;
+  private travelled = 0;
+  private lastTravelled = 0;
+  private touching: string | null = null;
   onChange: (s: PlayerState) => void = () => {};
 
   constructor(
@@ -65,9 +64,21 @@ export class Player {
     private camera: THREE.PerspectiveCamera,
     private dom: HTMLElement
   ) {
-    this.object.add(this.avatar);
+    this.object.add(this.rig.object);
     this.wire();
   }
+
+  /** swap the built-in body for a loaded character without losing where you are standing */
+  setRig(rig: AvatarRig) {
+    this.object.remove(this.rig.object);
+    this.rig.dispose();
+    this.rig = rig;
+    rig.object.visible = this.view === 'third';
+    this.object.add(rig.object);
+  }
+
+  /** the body other people see — kept as `avatar` because that is what it is */
+  get avatar(): THREE.Object3D { return this.rig.object; }
 
   /** drop the player onto the ground at a longitude and latitude */
   placeAt(lng: number, lat: number, headingDeg = 0) {
@@ -81,16 +92,19 @@ export class Player {
 
   get position(): THREE.Vector3 { return this.pos; }
   get headingDeg(): number { return ((-this.yaw * 180 / Math.PI) % 360 + 360) % 360; }
+  /** total ground covered, in metres — the gait is paced by this, not by the clock */
+  get distance(): number { return this.travelled; }
 
   state(): PlayerState {
     const ll = this.frame.toLngLat(this.pos.x, this.pos.z);
     return {
       lng: ll.lng, lat: ll.lat, groundM: this.ground, headingDeg: this.headingDeg,
-      speed: Math.hypot(this.vel.x, this.vel.z), view: this.view, grounded: this.grounded
+      speed: Math.hypot(this.vel.x, this.vel.z), view: this.view, grounded: this.grounded,
+      touching: this.touching
     };
   }
 
-  setView(v: View) { this.view = v; this.avatar.visible = v === 'third'; this.sync(); }
+  setView(v: View) { this.view = v; this.rig.object.visible = v === 'third'; this.sync(); }
   toggleView() { this.setView(this.view === 'third' ? 'first' : 'third'); }
 
   // ---- input ---------------------------------------------------------------------------------
@@ -117,7 +131,7 @@ export class Player {
       if (!this.locked && !this.dragging) return;
       this.look(e.movementX * LOOK, e.movementY * LOOK);
     });
-    // touch: one finger looks around
+    // touch: one finger anywhere but the thumbstick looks around
     this.dom.addEventListener('touchstart', e => {
       const t = e.touches[0]; if (t) this.lastTouch = { x: t.clientX, y: t.clientY };
     }, { passive: true });
@@ -146,6 +160,21 @@ export class Player {
     if (down) this.keys.add(s); else this.keys.delete(s);
   }
 
+  /**
+   * Set the movement axis directly: forward in [-1,1], right in [-1,1].
+   *
+   *   This is what the thumbstick drives. It is analog — half a stick is half a walk — and it is
+   *   the same path the keys take, so there is one movement implementation rather than two.
+   */
+  setAxis(fwd: number, side: number, run = false) {
+    this.axis.fwd = THREE.MathUtils.clamp(fwd, -1, 1);
+    this.axis.side = THREE.MathUtils.clamp(side, -1, 1);
+    this.axis.run = run;
+  }
+
+  /** jump from a button rather than the space bar */
+  jump() { if (this.grounded) { this.vel.y = JUMP; this.grounded = false; } }
+
   // ---- the step ------------------------------------------------------------------------------
   /**
    * Advance the body by dt seconds.
@@ -161,20 +190,29 @@ export class Player {
     const d = total / steps;
     for (let i = 0; i < steps; i++) this.step(d);
     this.sync();
+    const moved = this.travelled - this.lastTravelled;
+    this.lastTravelled = this.travelled;
+    this.rig.update({
+      dt: total, distance: moved,
+      speed: Math.hypot(this.vel.x, this.vel.z), grounded: this.grounded
+    });
   }
 
   private step(d: number) {
-    let fwd = 0, side = 0;
+    let fwd = this.axis.fwd, side = this.axis.side;
     if (this.keys.has('w') || this.keys.has('arrowup')) fwd += 1;
     if (this.keys.has('s') || this.keys.has('arrowdown')) fwd -= 1;
     if (this.keys.has('d') || this.keys.has('arrowright')) side += 1;
     if (this.keys.has('a') || this.keys.has('arrowleft')) side -= 1;
     if (this.keys.has('q')) this.yaw += 1.6 * d;
     if (this.keys.has('e')) this.yaw -= 1.6 * d;
+    fwd = THREE.MathUtils.clamp(fwd, -1, 1);
+    side = THREE.MathUtils.clamp(side, -1, 1);
 
-    const speed = this.keys.has('shift') ? RUN : WALK;
+    const speed = (this.keys.has('shift') || this.axis.run) ? RUN : WALK;
+    const before = { x: this.pos.x, z: this.pos.z };
     if (fwd || side) {
-      const len = Math.hypot(fwd, side);
+      const len = Math.max(1, Math.hypot(fwd, side));   // analog: half a stick is half a walk
       const sin = Math.sin(this.yaw), cos = Math.cos(this.yaw);
       // a body with rotation.y = yaw faces (-sin, 0, -cos) and its right hand is (cos, 0, -sin),
       // so at yaw 0 forward is -z, which is north in this frame
@@ -184,6 +222,10 @@ export class Player {
       this.pos.z += dz * d;
       this.vel.x = dx; this.vel.z = dz;
     } else { this.vel.x = this.vel.z = 0; }
+
+    const hit = this.solids.length ? resolve(this.pos, SHOULDER, this.solids) : null;
+    this.touching = hit ? hit.id : null;
+    this.travelled += Math.hypot(this.pos.x - before.x, this.pos.z - before.z);
 
     const ll = this.frame.toLngLat(this.pos.x, this.pos.z);
     this.ground = this.field.atOr(ll.lng, ll.lat, this.ground);

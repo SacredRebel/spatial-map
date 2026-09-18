@@ -133,6 +133,182 @@ check('structures: the registry is read from the atlas and drawn — a reserved 
 check('structures: the massing block sits on the ground, not at sea level', built.massingY > 480 && built.massingY < 560,
   { y: built.massingY == null ? null : +built.massingY.toFixed(1) });
 
+// ---- what grows here ---------------------------------------------------------------------------
+// The scatter is a rule, not a list, so what is checked is that the rule was obeyed: every plant
+// stands ON the surface, none stands inside a building, and the species split matches the ground.
+// The fixture is a gentle slope that falls to the north, which is oak country, so oaks should not
+// be outnumbered by chaparral on it.
+const veg = await page.evaluate(() => {
+  const v = window.world.vegetation;
+  const meshes = v.group.children.map(m => m.name);
+  const sample = [];
+  for (const m of v.group.children) {
+    const step = Math.max(1, Math.floor(m.count / 24));
+    for (let i = 0; i < m.count; i += step) {
+      const e = m.instanceMatrix.array;
+      const o = i * 16;
+      sample.push({ name: m.name, x: e[o + 12], y: e[o + 13], z: e[o + 14] });
+    }
+  }
+  return { counts: v.counts, meshes, sample, total: v.group.children.reduce((a, m) => a + m.count, 0) };
+});
+check('vegetation: both species are planted, instanced, and there are enough of them to be a hillside',
+  veg.counts.oak > 80 && veg.counts.shrub > 40 && veg.meshes.includes('veg-oak') && veg.meshes.includes('veg-shrub'),
+  { ...veg.counts, meshes: veg.meshes });
+// nothing grows through a building: the footprint of the massing block has to come out bare
+const overlap = await page.evaluate(() => {
+  const w = window.world;
+  // every footprint the atlas knows about, built as well as merely reserved
+  const rings = w.structures.list
+    .filter(x => x.outline && x.outline.length >= 3)
+    .map(x => x.outline.map(([lng, lat]) => w.frame.toWorld(lng, lat)));
+  const inside = (x, z) => rings.some(ring => {
+    let hit = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const a = ring[i], b = ring[j];
+      if ((a.z > z) !== (b.z > z) && x < ((b.x - a.x) * (z - a.z)) / (b.z - a.z) + a.x) hit = !hit;
+    }
+    return hit;
+  });
+  let hits = 0, checked = 0;
+  for (const m of w.vegetation.group.children) {
+    const e = m.instanceMatrix.array;
+    for (let i = 0; i < m.count; i++) {
+      checked++;
+      if (inside(e[i * 16 + 12], e[i * 16 + 14])) hits++;
+    }
+  }
+  return { hits, checked };
+});
+check('vegetation: not one plant grows inside a footprint the atlas has drawn', overlap.hits === 0, overlap);
+
+// the rule itself, asked directly: oak on the gentle cool ground, chaparral on the steep dry ground
+const rule = await page.evaluate(() => ({
+  gentleNorth: window.world.vegetation.mix(0.05, 1),
+  steepSouth: window.world.vegetation.mix(0.55, -1)
+}));
+check('vegetation: the rule prefers oak on gentle north-facing ground and chaparral on steep south-facing ground',
+  rule.gentleNorth.oak > rule.gentleNorth.shrub * 3 && rule.steepSouth.shrub > rule.steepSouth.oak * 3,
+  { gentleNorth: { oak: +rule.gentleNorth.oak.toFixed(2), shrub: +rule.gentleNorth.shrub.toFixed(2) },
+    steepSouth: { oak: +rule.steepSouth.oak.toFixed(2), shrub: +rule.steepSouth.shrub.toFixed(2) } });
+
+// 200,000 m2 of fixture ground: real coast live oak woodland runs 40-120 stems a hectare
+{
+  const perHa = veg.counts.oak / 20;
+  check('vegetation: the oaks come out at the density of real oak woodland, not a plantation or a park',
+    perHa > 35 && perHa < 160, { oaksPerHectare: +perHa.toFixed(0) });
+}
+
+// the scatter is seeded by POSITION, so replanting from somewhere else must not move a single plant
+const stable = await page.evaluate(() => {
+  const w = window.world, v = w.vegetation;
+  const opts = { radius: 420, density: 1 };
+  const grab = () => {
+    const m = v.group.children.find(c => c.name === 'veg-oak');
+    const out = new Map();
+    const e = m.instanceMatrix.array;
+    for (let i = 0; i < m.count; i++) {
+      out.set(`${e[i * 16 + 12].toFixed(3)}|${e[i * 16 + 14].toFixed(3)}`, e[i * 16 + 13]);
+    }
+    return out;
+  };
+  const p = w.player.position;
+  v.build(p.x, p.z, opts);
+  const a = grab();
+  v.build(p.x + 60, p.z - 45, opts);      // walk away and replant
+  const b = grab();
+  let shared = 0, moved = 0;
+  for (const [k, y] of a) if (b.has(k)) { shared++; if (Math.abs(b.get(k) - y) > 1e-6) moved++; }
+  w.replant();                              // put the world back the way it plants itself
+  return { a: a.size, b: b.size, shared, moved };
+});
+check('vegetation: replanting from a different standing position puts every shared plant back in exactly the same place',
+  stable.shared > 200 && stable.moved === 0, stable);
+
+{
+  // every sampled plant must sit exactly on the surface the walker stands on
+  const wrong = veg.sample.map(p => {
+    const ll = { lng: ORIGIN.lng + p.x / MX, lat: ORIGIN.lat - p.z / MY };
+    return Math.abs(p.y - truth(ll.lng, ll.lat));
+  });
+  const worstPlant = Math.max(...wrong);
+  check('vegetation: every plant stands on the ground, not above or below it', worstPlant < 0.05,
+    { sampled: veg.sample.length, worstErrorM: +worstPlant.toFixed(4) });
+}
+
+// ---- walls ---------------------------------------------------------------------------------------
+const wall = await page.evaluate(() => {
+  const w = window.world, p = w.player;
+  // stand five metres south of the massing block, face north, and walk into it for ten seconds
+  w.goto(-119.15685, 34.432955, 0);
+  p.key('w', true);
+  for (let i = 0; i < 10; i++) p.update(1);
+  p.key('w', false);
+  const s = p.state();
+  return { lat: s.lat, lng: s.lng, touching: s.touching, solids: p.solids.length };
+});
+// the block's south edge is at 34.43300; a body with a shoulder of 0.34 m stops just short of it
+check('walls: the massing block stops the walker instead of letting them through it',
+  wall.lat < 34.43300 && wall.lat > 34.43290 && wall.touching === 'fixture-massing',
+  { lat: +wall.lat.toFixed(6), stoppedShortM: +((34.43300 - wall.lat) * MY).toFixed(2), touching: wall.touching });
+check('walls: only what is built is solid — reserved ground is still walkable', wall.solids === 1,
+  { solids: wall.solids });
+
+// ---- the walk cycle --------------------------------------------------------------------------
+// One stride is 1.55 m (STRIDE in player/avatar.ts). The gait is paced by ground covered, so after
+// exactly one stride the legs are back where they started, and after half a stride they have swapped.
+const cycle = await page.evaluate(() => {
+  const rig = window.world.player.rig;
+  const step = (d) => rig.update({ dt: 0.1, distance: d, speed: 1.6, grounded: true });
+  step(0);
+  const a = { ...rig.pose };
+  step(1.55);
+  const full = { ...rig.pose };
+  step(1.55 / 2);
+  const half = { ...rig.pose };
+  step(1.55 / 2);          // back to the top of the cycle
+  rig.update({ dt: 0.1, distance: 0, speed: 0, grounded: true });
+  const still = { ...rig.pose };
+  return { a, full, half, still, kind: rig.kind };
+});
+check('gait: one stride of ground covered returns the legs to where they started',
+  Math.abs(cycle.full.leftLeg - cycle.a.leftLeg) < 1e-6 && Math.abs(cycle.full.rightLeg - cycle.a.rightLeg) < 1e-6,
+  { start: +cycle.a.leftLeg.toFixed(4), afterOneStride: +cycle.full.leftLeg.toFixed(4) });
+check('gait: half a stride later the legs have swapped, and the arms swing opposite the legs',
+  Math.abs(cycle.half.leftLeg - cycle.full.rightLeg) < 1e-6 &&
+  Math.sign(cycle.half.leftArm) === Math.sign(cycle.half.rightLeg) &&
+  cycle.half.leftKnee >= 0 && cycle.half.rightKnee >= 0,
+  { leftLeg: +cycle.half.leftLeg.toFixed(3), rightLeg: +cycle.half.rightLeg.toFixed(3), leftArm: +cycle.half.leftArm.toFixed(3) });
+check('gait: standing still, the body stands still', Math.abs(cycle.still.leftLeg) < 1e-9 && cycle.still.bob < 1e-9,
+  cycle.still);
+
+// ---- thumbs ------------------------------------------------------------------------------------
+// The stick feeds the same movement axis the keys do. Half a stick must be half a walk, or a phone
+// and a keyboard are two different worlds.
+const thumb = await page.evaluate(() => {
+  const w = window.world, p = w.player;
+  const run = (fwd) => {
+    w.goto(-119.156345, 34.432675, 0);
+    const a = p.state();
+    p.setAxis(fwd, 0, false);
+    p.update(1);
+    p.setAxis(0, 0, false);
+    return (p.state().lat - a.lat);
+  };
+  const full = run(1), half = run(0.5);
+  w.stick.set(0, 0, false);
+  return { full: full, half: half, hasStick: !!w.stick };
+});
+check('thumbstick: a full stick walks 1.6 m and half a stick walks half of it, through the same axis as the keys',
+  Math.abs(thumb.full * MY - 1.6) < 0.02 && Math.abs(thumb.half * MY - 0.8) < 0.02 && thumb.hasStick,
+  { fullM: +(thumb.full * MY).toFixed(2), halfM: +(thumb.half * MY).toFixed(2) });
+
+// ---- the character ------------------------------------------------------------------------------
+// A missing or broken avatar file must never leave the world without a body.
+const fallback = await page.evaluate(() => window.world.setAvatar('/no-such-avatar.vrm'));
+check('avatar: a file that will not load falls back to the built-in body rather than emptying the world',
+  fallback === 'capsule', { kind: fallback });
+
 // ---- the sun ----------------------------------------------------------------------------------
 const sun = await page.evaluate(() => {
   const out = [];

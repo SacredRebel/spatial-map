@@ -46,3 +46,37 @@ canvas { display: block; touch-action: none; }
   .keys { display: none; }
   .readout { left: 10px; right: 10px; bottom: 10px; flex-direction: row; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
 }
+
+/* who is walking — only shown once a real character has loaded */
+.who { margin-top: 4px; font: 700 9.5px var(--mono); letter-spacing: 1px; text-transform: uppercase; color: var(--violet); }
+.who[hidden] { display: none; }
+
+/* the thumbstick: analog movement for thumbs, hidden on machines with a keyboard */
+.stick-layer { position: fixed; inset: 0; z-index: 3; pointer-events: none; }
+.stick-layer[hidden] { display: none; }
+.stick-pad {
+  position: absolute; left: 18px; bottom: 18px; width: 132px; height: 132px; border-radius: 50%;
+  background: radial-gradient(circle at 50% 50%, rgba(20,26,22,0.5), rgba(10,13,11,0.72));
+  border: 1px solid var(--line); pointer-events: auto; touch-action: none;
+  display: grid; place-items: center;
+}
+.stick-knob {
+  width: 54px; height: 54px; border-radius: 50%;
+  background: rgba(224, 182, 74, 0.28); border: 1.5px solid var(--gold);
+  transition: transform 90ms ease-out;
+}
+.stick-pad:active .stick-knob { transition: none; }
+.stick-btns { position: absolute; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 10px; pointer-events: auto; }
+.stick-btn {
+  width: 62px; height: 62px; border-radius: 50%; font-size: 21px; line-height: 1;
+  background: var(--panel); border: 1px solid var(--line); color: var(--ink-2); cursor: pointer;
+  touch-action: manipulation;
+}
+.stick-jump { border-color: var(--gold); color: var(--gold); }
+
+/* on a phone the keyboard hint and the readout are just clutter under the thumbs */
+@media (pointer: coarse) {
+  .keys { display: none; }
+  .readout { right: 92px; bottom: 96px; font-size: 10px; }
+  .time { width: min(232px, 54vw); }
+}
