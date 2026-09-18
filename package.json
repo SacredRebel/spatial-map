@@ -1,6 +1,6 @@
 {
   "name": "spatial-map",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "The walkable world — a browser-native open world over real 1 m terrain, one world per community.",
@@ -12,6 +12,7 @@
     "test": "node tests/world.test.mjs"
   },
   "dependencies": {
+    "@pixiv/three-vrm": "^3.5.5",
     "three": "^0.180.0"
   },
   "devDependencies": {
