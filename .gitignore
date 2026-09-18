@@ -3,3 +3,5 @@ dist
 .DS_Store
 *.log
 .vite
+# built at deploy by scripts/massing/build-models.mjs — the model is the script
+public/models/
