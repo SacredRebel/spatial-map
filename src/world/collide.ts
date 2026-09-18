@@ -31,6 +31,7 @@ export function solidsFrom(list: Structure[], frame: Frame, field: HeightField, 
   for (const s of list) {
     if (pid && s.pid !== pid) continue;
     if (s.status === 'site') continue;                 // reserved ground is walkable
+    if (s.status === 'model' && s.enter) continue;     // its own floors and walls do the stopping
     if (!s.outline || s.outline.length < 3) continue;
     let base = Infinity;
     const ring = s.outline.map(([lng, lat]) => {
