@@ -34,7 +34,8 @@ behind Vercel's own sign-in; they are for checking a build, not for sharing.
 ```bash
 npm install
 npm run dev        # http://localhost:5180
-npm run build      # typecheck, then build to dist/
+npm run models     # the massing models into public/models (python3 with numpy and scipy)
+npm run build      # the models, then typecheck, then build to dist/
 npm test           # the world, driven in a real browser against a known hillside
 ```
 
@@ -210,7 +211,23 @@ draws, so a laptop at four frames a second walks at the same speed as a workstat
 
 **`world/structures.ts`** — what is proposed to stand here, in the same three states the atlas
 draws: reserved ground, a massing block, or a real `.glb`. The glTF loader is imported only when
-there is a model to load.
+there is a model to load. A model you can go into says so in its row (`enter: true`) and carries
+its own floors and walls in the file — `extras.walk` on the scene, plan rings in model metres with
+a top for each floor and a base and top for each wall — and the world stands on those and stops at
+those instead of treating the outline as one solid block. A row may also say what standing thing
+it replaces (`clears: ['house']`, by the kind the record draws it as), so a proposal is never drawn
+through the building it is meant to succeed; and the record's trees inside a model's outline are
+not drawn either, since nothing grows through a floor.
+
+**`scripts/massing/`** — a massing model made by script, not by hand. `glb.py` is a small glTF
+writer (one mesh per material, the walk rings on the scene) and `oak-leaf.py` is the first house
+made with it: the Oak Leaf for Sulphur Mountain, three leaves round the river-stone chimney that
+stands there today, every level and every length in metres, sited from the owner's own marks on
+the aerial. `preview.mjs` renders a `.glb` on its own from a few points of view, so a model can be
+looked at before it goes anywhere near the ground. No `.glb` is committed: `build-models.mjs` runs
+the generators at build time into `public/models`, so the model is served beside the world
+(`/models/oak-leaf-massing.glb`) and its row in the atlas's `data/structures.json` points there. A
+change to the design is a change to the script, never a hand edit of a mesh.
 
 **`edit/editor.ts`** — the pencil. Picking is a raycast against the record's instanced trees (the
 instance id maps back to the row of the record), the standing things and the structures, and for the
@@ -253,8 +270,10 @@ a room, a curved adobe wing under a vault, a deck — and `inside` standing in i
 - **The ground's own photographs.** The tiles are CC0 materials matched to the property's colours;
   straight-down photographs of the straw, the drive and the litter would replace them with the
   land's own grain.
-- **The house.** The new build as a `.glb`, sited from the surveyed line and never from the county
-  ring, in the atlas's registry so it appears here the moment it is placed there.
+- **The house, further.** The Oak Leaf is a massing — the shape at the right size on the right
+  ground. What it wants next: the leaf shells from a real structural sketch (rib spacing, spans),
+  the interior partitions, textures from the pack's materials on the stone and the timber, and the
+  design itself settled against the sun study before any of that.
 - **Construction, further.** Stairs between floors; walls that meet cleanly when drawn as separate
   lines; textures on the parts from the pack's materials; a model broken into parts (a `.glb` from
   meshy.ai split into walls, floor and roof so it is edited like the rest).
