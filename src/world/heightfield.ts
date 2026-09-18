@@ -11,6 +11,7 @@
 //   terrarium: elevation = (R * 256 + G + B / 256) - 32768, in metres above sea level.
 
 import { tileBounds, tileOf, tilesCovering, type TileId } from './geo';
+import { shaped, type Shaping } from './shaping';
 
 const SIZE = 256;
 
@@ -130,8 +131,26 @@ export class HeightField {
     return null;
   }
 
-  /** metres above sea level, bilinearly interpolated, or null where nothing is loaded */
+  /** the owner's shapings of the ground — pads, banks, hollows — applied after the tiles */
+  shapings: Shaping[] = [];
+  /** how many times the shapings have changed; whatever caches heights rebuilds when this moves */
+  shapingGen = 0;
+
+  setShapings(list: Shaping[]) {
+    const same = list.length === this.shapings.length && list.every((s, i) => s.id === this.shapings[i].id && s.height === this.shapings[i].height && s.op === this.shapings[i].op && s.edge === this.shapings[i].edge && s.ring.length === this.shapings[i].ring.length);
+    this.shapings = list;
+    if (!same) this.shapingGen++;
+  }
+
+  /** metres above sea level, bilinearly interpolated and shaped, or null where nothing is loaded */
   at(lng: number, lat: number): number | null {
+    const h = this.raw(lng, lat);
+    if (h == null || !this.shapings.length) return h;
+    return shaped(h, lng, lat, this.shapings);
+  }
+
+  /** the tiles' own ground, before any shaping */
+  raw(lng: number, lat: number): number | null {
     const t = this.find(lng, lat);
     if (!t) return null;
     const [w, s, e, n] = t.bounds;

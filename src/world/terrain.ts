@@ -187,9 +187,20 @@ export class Terrain {
     return p;
   }
 
+  /** the ground has been reshaped: the near rings are sampled again where they stand */
+  reshape() {
+    if (this.coarse && this.coarseOpts) this.buildCoarse(this.coarseCentre.x, this.coarseCentre.y, this.coarseOpts);
+    if (this.fine && this.fineOpts) this.buildFine(this.fineCentre.x, this.fineCentre.y, this.fineOpts);
+  }
+
+  private coarseCentre = new THREE.Vector2();
+  private coarseOpts: TerrainOpts | null = null;
+
   /** the middle distance, built once and left alone */
   buildCoarse(centreX: number, centreZ: number, o: TerrainOpts) {
     if (this.coarse) { this.group.remove(this.coarse); this.coarse.geometry.dispose(); }
+    this.coarseCentre.set(centreX, centreZ);
+    this.coarseOpts = o;
     this.coarse = this.build(centreX, centreZ, o, -0.15);
     this.coarse.name = 'terrain-coarse';
     this.coarse.renderOrder = -1;

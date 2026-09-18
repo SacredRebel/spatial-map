@@ -108,7 +108,9 @@ export function start(port = PORT) {
         server.asked.push({ box: body.box, heading: body.heading, text: last, turns: (body.messages || []).length });
         const actions = /shed/.test(last)
           ? [{ type: 'block', name: 'the shed', w: 6, d: 4, h: 3, e: 10, n: 0, heading: 90 }, { type: 'marker', name: 'shed door', e: 7, n: 0 }]
-          : [];
+          : /orchard/.test(last)
+            ? [{ type: 'zone', name: 'the orchard', kind: 'orchard', points: [[0, 0], [20, 0], [20, 15], [0, 15]] }, { type: 'terrain', op: 'flatten', height_m: 0, edge_m: 2, points: [[30, 0], [40, 0], [40, 10], [30, 10]] }]
+            : [];
         return send(res, 200, JSON.stringify({ ok: true, reply: actions.length ? 'A shed, then: six by four, three metres high, ten metres east of the box, with a marker at its door.' : 'Tell me a shape.', actions, stub: false }), TYPES['.json']);
       }
       // the atlas's save endpoint, as the world sees it: the PIN is checked, the features are kept

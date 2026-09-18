@@ -17,8 +17,12 @@ const TOOLS: { id: Tool; key: string; label: string; hint: string; needs?: keyof
   { id: 'path', key: '5', label: '⋯ path', hint: 'click along the path · Enter to finish' },
   { id: 'road', key: '6', label: '═ road', hint: 'click along the road · Enter to finish' },
   { id: 'block', key: '7', label: '▢ block', hint: 'set the size, then click the ground to put it down facing the way you face', needs: 'place' },
-  { id: 'magic', key: '8', label: '✦ magic box', hint: 'click the ground to put down a box you can talk to', needs: 'magic' }
+  { id: 'magic', key: '8', label: '✦ magic box', hint: 'click the ground to put down a box you can talk to', needs: 'magic' },
+  { id: 'zone', key: '9', label: '⬠ territory', hint: 'click the corners of an area on the ground · Enter to close it' },
+  { id: 'terrain', key: '0', label: '⛰ ground', hint: 'click the corners of the ground to shape · Enter to shape it', needs: 'place' }
 ];
+
+const ZONE_KINDS = ['zone', 'garden', 'orchard', 'pasture', 'site', 'camp', 'water', 'keep', 'forest'];
 
 export interface PanelOpts {
   askPin: () => string | null;
@@ -43,7 +47,7 @@ export class Panel {
     if (!e.active) return;
     const caps = this.o.caps();
     const busy = e.moving ? `<div class="ep-note">put <b>${esc(e.moving.name)}</b> down: click the ground · Esc cancels</div>`
-      : e.drawing.length ? `<div class="ep-note">${e.drawing.length} point${e.drawing.length === 1 ? '' : 's'} · <b>Enter</b> finish · <b>Backspace</b> undo point · <b>Esc</b> cancel</div>`
+      : e.drawing.length ? `<div class="ep-note">${e.drawing.length} point${e.drawing.length === 1 ? '' : 's'} · <b>Enter</b> ${e.tool === 'zone' || e.tool === 'terrain' ? 'close the ring' : 'finish'} · <b>Backspace</b> undo point · <b>Esc</b> cancel</div>`
       : '';
     const save = e.lastSave ? `<div class="ep-save ${e.lastSave.ok ? 'ok' : 'bad'}">${esc(e.lastSave.message)}</div>` : '';
     const proposed = e.proposed.edits.length + e.proposed.structures.length;
@@ -52,7 +56,7 @@ export class Panel {
       <div class="ep-head"><b>edit</b><span>${e.unsaved} unsaved${proposed ? ` · ${proposed} proposed` : ''}</span><em class="ep-role">${esc(this.o.role())}</em><button class="ep-x" data-act="close" title="leave edit mode (B)">×</button></div>
       <div class="ep-tools">${tools.map(t => `<button class="ep-tool${t.id === e.tool ? ' on' : ''}" data-tool="${t.id}" title="${esc(t.hint)} (${t.key})">${t.label}</button>`).join('')}</div>
       <div class="ep-hint">${esc(TOOLS.find(t => t.id === e.tool)?.hint ?? '')}</div>
-      ${e.tool === 'block' ? this.blockForm() : ''}
+      ${e.tool === 'block' ? this.blockForm() : e.tool === 'terrain' ? this.shapeForm() : e.tool === 'zone' ? this.zoneForm() : ''}
       ${busy}
       ${this.selection(e.selection)}
       <div class="ep-list">${this.list()}</div>
@@ -69,6 +73,16 @@ export class Panel {
       const k = i.dataset.block as 'name' | 'w' | 'd' | 'h';
       if (k === 'name') e.block.name = i.value.trim() || 'block';
       else { const v = Number(i.value); if (isFinite(v) && v > 0) e.block[k] = v; }
+    }));
+    this.root.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-shape]').forEach(i => i.addEventListener('change', () => {
+      const k = i.dataset.shape as 'op' | 'height' | 'edge';
+      if (k === 'op') e.shape.op = (i.value === 'raise' || i.value === 'lower') ? i.value : 'flatten';
+      else { const v = Number(i.value); if (isFinite(v) && v >= 0) e.shape[k] = v; }
+      this.render();
+    }));
+    this.root.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-zone]').forEach(i => i.addEventListener('change', () => {
+      const k = i.dataset.zone as 'name' | 'kind';
+      e.zone[k] = i.value.trim();
     }));
     const height = this.root.querySelector<HTMLInputElement>('[data-height]');
     height?.addEventListener('change', () => { const s = e.selection; if (s?.kind === 'structure') e.setHeight(s.id, Number(height.value)); });
@@ -87,6 +101,24 @@ export class Panel {
     </div>`;
   }
 
+  private shapeForm(): string {
+    const sh = this.editor.shape;
+    return `<div class="ep-form">
+      <label>do <select data-shape="op">${['flatten', 'raise', 'lower'].map(o => `<option value="${o}" ${o === sh.op ? 'selected' : ''}>${o}</option>`).join('')}</select></label>
+      ${sh.op === 'flatten' ? `<small>to the mean level of its outline</small>` : `<label>by <input data-shape="height" type="number" step="0.25" min="0.1" max="20" value="${sh.height}"> m</label>`}
+      <label>bank <input data-shape="edge" type="number" step="0.5" min="0" max="40" value="${sh.edge}"> m</label>
+      <small>a pad flattened for a house, a bank raised, a hollow cut · the ground eases back into the hill across the bank</small>
+    </div>`;
+  }
+
+  private zoneForm(): string {
+    const z = this.editor.zone;
+    return `<div class="ep-form">
+      <label>name <input data-zone="name" value="${esc(z.name)}" placeholder="the orchard"></label>
+      <label>kind <select data-zone="kind">${ZONE_KINDS.map(k => `<option value="${k}" ${k === z.kind ? 'selected' : ''}>${k}</option>`).join('')}</select></label>
+    </div>`;
+  }
+
   private selection(p: Pick | null): string {
     if (!p) return `<div class="ep-sel muted">nothing selected</div>`;
     switch (p.kind) {
@@ -101,6 +133,9 @@ export class Panel {
           <div class="ep-row">${p.magic ? `<button class="btn gold" data-act="talk">✦ talk</button>` : ''}<button class="btn" data-act="remove">✕ remove</button></div></div>`;
       case 'line':
         return `<div class="ep-sel"><b>${esc(this.lineName(p.id))}</b> <small>drawn</small>
+          <div class="ep-row"><button class="btn" data-act="remove">✕ remove</button></div></div>`;
+      case 'zone':
+        return `<div class="ep-sel"><b>${esc(p.name)}</b> <small>territory</small>
           <div class="ep-row"><button class="btn" data-act="remove">✕ remove</button></div></div>`;
       case 'building':
         return `<div class="ep-sel"><b>${esc(p.name)}</b> <small>standing — from the county record; it cannot be edited here</small></div>`;
@@ -139,6 +174,8 @@ export class Panel {
         : p.op === 'add' && p.layer === 'trees' ? `tree ${Number(p.height_m).toFixed(1)} m planted`
         : p.op === 'add' && p.layer === 'notes' ? `marker “${esc(p.name)}”`
         : p.op === 'add' && p.layer === 'lines' ? `${esc(p.kind)} “${esc(p.name)}”`
+        : p.op === 'add' && p.layer === 'zones' ? `territory “${esc(p.name)}” (${esc(p.kind)})`
+        : p.op === 'add' && p.layer === 'terrain' ? `ground ${esc(p.terrain_op)}${p.height_m != null ? ` ${Number(p.height_m)} m` : ''}`
         : `${esc(p.op)} ${esc(p.layer)}`;
       items.push(`<div class="ep-item">${what}</div>`);
     }

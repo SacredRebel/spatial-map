@@ -82,6 +82,14 @@ else. The agent can do nothing a builder could not do by hand. With `ANTHROPIC_A
 atlas the agent is Claude with those five tools and nothing else; without it, a small parser
 answers plain commands and says so. The transcript stays with the box, in your browser.
 
+**Territories and the ground.** Tool **9** draws a territory — click the corners, Enter closes the
+ring — a translucent fill that lies on the hillside with a name and a kind (garden, orchard, pasture,
+site, camp, water, keep, forest). Tool **0** shapes the ground inside a ring: *flatten* it to a pad at
+the mean level of its outline, *raise* or *lower* it by so many metres, with a bank of a few metres
+that eases back into the hill. The record's tiles are never rewritten: a shaping is one edit feature
+the height field applies after the tiles, and because the terrain mesh, every tree, every building,
+the walker and the grid all ask that one function, they follow without knowing.
+
 **Three roles.** A *member* walks, flies and reads — click a post, a building, a block, and a card
 says what it is. A *builder* has every tool, and what a builder saves is a **proposal** that waits
 for an admin. An *admin* saves at once and decides the proposals. The role comes from a PIN the
@@ -182,7 +190,9 @@ whole row, or an id to remove); undo steps back through snapshots; the unsaved w
 **`edit/panel.ts`** is the view of it; **`edit/grid.ts`** the metre raster on the ground;
 **`edit/magic.ts`** the box's chat — voice in through the browser's own recognition where it has
 one, voice out through its speech, the agent's proposals taken through the editor's own methods;
-**`ui/inspect.ts`** the member's card; **`world/roles.ts`** the table of who may do what.
+**`ui/inspect.ts`** the member's card; **`world/roles.ts`** the table of who may do what;
+**`world/shaping.ts`** the ground's shapings — a Polygon with an op, a target, an edge — applied
+inside `HeightField.at()` after the tiles, with a smoothstep bank.
 
 ## Testing
 
@@ -199,7 +209,8 @@ generated on the spot by `tests/fixture.mjs` — no binaries in the repo, nothin
 `/realpack/`, and `node scripts/shot.mjs "<url>" out.png [lng,lat,heading] [first|third|fly|edit|place]`
 boots the built world against it headless and writes a screenshot — `fly` from 50 m up, `edit` with
 the editor open and a marker, a fence and a path already drawn, `place` with a block on the grid,
-`magic` at a box with a conversation and its proposals.
+`magic` at a box with a conversation and its proposals, `ground` with a pad flattened, a bank raised,
+two territories and a block on the pad.
 
 ## What is next
 
@@ -212,8 +223,6 @@ the editor open and a marker, a fence and a path already drawn, `place` with a b
   land's own grain.
 - **The house.** The new build as a `.glb`, sited from the surveyed line and never from the county
   ring, in the atlas's registry so it appears here the moment it is placed there.
-- **Territories and terrain.** Zone polygons drawn on the ground; a pad flattened, ground raised or
-  lowered, with everything that asks the height function following.
 - **Construction.** Walls as lines and curves with height and thickness, floors, roofs, openings —
   the house built element by element, at real size, and walked through.
 - **Real collision.** three-mesh-bvh against the models once there are models.

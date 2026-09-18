@@ -27,13 +27,17 @@ import { mergeChanges, type Structures, type Structure, type StructureChange } f
 import type { Caps } from '../world/roles';
 import type { GroundGrid } from './grid';
 
-export type Tool = 'select' | 'marker' | 'tree' | 'fence' | 'path' | 'road' | 'block' | 'magic';
+export type Tool = 'select' | 'marker' | 'tree' | 'fence' | 'path' | 'road' | 'block' | 'magic' | 'zone' | 'terrain';
+
+export interface ShapeSpec { op: 'flatten' | 'raise' | 'lower'; height: number; edge: number }
+export interface ZoneSpec { name: string; kind: string }
 
 export type Pick =
   | { kind: 'tree'; index: number; tree: PackTree; point: THREE.Vector3 }
   | { kind: 'vision'; id: string; name: string; object: THREE.Object3D; point: THREE.Vector3 }
   | { kind: 'note'; id: string; name: string; magic: boolean; object: THREE.Object3D; point: THREE.Vector3 }
   | { kind: 'line'; id: string; object: THREE.Object3D; point: THREE.Vector3 }
+  | { kind: 'zone'; id: string; name: string; object: THREE.Object3D; point: THREE.Vector3 }
   | { kind: 'building'; name: string; object: THREE.Object3D; point: THREE.Vector3 }
   | { kind: 'structure'; id: string; structure: Structure; object: THREE.Object3D; point: THREE.Vector3 }
   | { kind: 'ground'; point: THREE.Vector3; lng: number; lat: number };
@@ -93,6 +97,10 @@ export class Editor {
   drawing: [number, number][] = [];
   /** the block the next ground click puts down */
   block: BlockSpec = { name: 'block', w: 12, d: 8, h: 4 };
+  /** how the next drawn polygon shapes the ground */
+  shape: ShapeSpec = { op: 'flatten', height: 1, edge: 3 };
+  /** what the next drawn territory is */
+  zone: ZoneSpec = { name: '', kind: 'zone' };
   /** what the last save said, for the panel */
   lastSave: { ok: boolean; message: string; at: number } | null = null;
   private history: Snapshot[] = [];
@@ -257,6 +265,7 @@ export class Editor {
       if (type === 'vision') return { kind: 'vision', id, name: this.visionName(id), object: o, point: hit.point };
       if (type === 'note') return { kind: 'note', id, name: this.noteName(id), magic: this.noteIsMagic(id), object: o, point: hit.point };
       if (type === 'line') return { kind: 'line', id, object: o, point: hit.point };
+      if (type === 'zone') return { kind: 'zone', id, name: this.zoneName(id), object: o, point: hit.point };
       if (type === 'today') return { kind: 'building', name: id, object: o, point: hit.point };
       if (type === 'massing' || type === 'model' || type === 'plan' || type === 'site') {
         const s = this.structure(id);
@@ -277,6 +286,10 @@ export class Editor {
   private noteName(id: string): string {
     const f = this.o.pack()?.notes.features.find(x => String(x.properties.id) === id);
     return String(f?.properties.name || id);
+  }
+  private zoneName(id: string): string {
+    const f = this.o.pack()?.zones.features.find(x => String(x.properties.id) === id);
+    return String(f?.properties.name || f?.properties.kind || id);
   }
   private noteIsMagic(id: string): boolean {
     const f = this.o.pack()?.notes.features.find(x => String(x.properties.id) === id);
@@ -452,6 +465,8 @@ export class Editor {
       else if (k === '6') this.setTool('road');
       else if (k === '7') this.setTool('block');
       else if (k === '8') this.setTool('magic');
+      else if (k === '9') this.setTool('zone');
+      else if (k === '0') this.setTool('terrain');
     });
   }
 
@@ -469,7 +484,7 @@ export class Editor {
       case 'tree': if (p.kind === 'ground') this.promptTree(p.lng, p.lat); break;
       case 'block': if (p.kind === 'ground' && this.o.caps().place) this.addBlock(p.lng, p.lat, this.block, this.o.player.state().headingDeg); break;
       case 'magic': if (p.kind === 'ground' && this.o.caps().magic) this.promptMagic(p.lng, p.lat); break;
-      case 'fence': case 'path': case 'road':
+      case 'fence': case 'path': case 'road': case 'zone': case 'terrain':
         if (p.kind === 'ground') { this.drawing.push([p.lng, p.lat]); this.previewLine(null); this.o.onChange(this); }
         break;
     }
@@ -551,6 +566,28 @@ export class Editor {
     this.commit({ type: 'Feature', properties: this.stamp({ op: 'add', layer: 'lines', kind, name }), geometry: { type: 'LineString', coordinates: coords } });
   }
 
+  /** a territory drawn on the ground: a ring with a name and what it is for */
+  addZone(coords: [number, number][], name: string, kind = 'zone') {
+    const ring = coords.slice();
+    if (ring.length < 3) return;
+    ring.push(ring[0]);
+    this.commit({ type: 'Feature', properties: this.stamp({ op: 'add', layer: 'zones', name, kind }), geometry: { type: 'Polygon', coordinates: [ring] } });
+  }
+
+  /**
+   * The ground shaped inside a ring: flattened to a level (the mean of the ring's ground when none
+   * is given), raised or lowered by so many metres, with a bank of `edge` metres outside it.
+   */
+  addShaping(coords: [number, number][], op: 'flatten' | 'raise' | 'lower', height: number, edge = 3, toM?: number) {
+    const ring = coords.slice();
+    if (ring.length < 3) return;
+    ring.push(ring[0]);
+    const props: Record<string, unknown> = { op: 'add', layer: 'terrain', terrain_op: op, edge_m: Math.min(40, Math.max(0, edge)) };
+    if (op === 'flatten') { if (toM != null && isFinite(toM)) props.to_m = toM; }
+    else props.height_m = Math.min(20, Math.max(0.1, Math.abs(height)));
+    this.commit({ type: 'Feature', properties: this.stamp(props), geometry: { type: 'Polygon', coordinates: [ring] } });
+  }
+
   /** pick up a project's post; the next ground click puts it down */
   beginMove(id: string, name: string) { this.moving = { id, name }; this.o.onChange(this); }
 
@@ -571,7 +608,7 @@ export class Editor {
       const where = f && f.geometry.type === 'Point' ? f.geometry.coordinates : [p.point.x, p.point.y] as [number, number];
       this.commit({ type: 'Feature', properties: this.stamp({ op: 'remove', layer: 'vision', target: p.id }), geometry: { type: 'Point', coordinates: where } });
     }
-    else if (p.kind === 'note' || p.kind === 'line') {
+    else if (p.kind === 'note' || p.kind === 'line' || p.kind === 'zone') {
       const before = this.edits.length;
       const next = this.edits.filter(f => String(f.properties.id) !== p.id);
       if (next.length !== before) { this.snapshot(); this.edits = next; this.persist(); this.redraw(); this.select(null); this.setHover(null); this.o.onChange(this); }
@@ -589,18 +626,33 @@ export class Editor {
     if (isFinite(h) && h > 0.5 && h < 60) this.addTree(lng, lat, h);
   }
 
+  /** the tool draws a ring rather than a line */
+  private get polygonal(): boolean { return this.tool === 'zone' || this.tool === 'terrain'; }
+
   private previewLine(cursor: THREE.Vector3 | null) {
     const pts = this.drawing.map(([lng, lat]) => {
       const w = this.o.frame.toWorld(lng, lat);
       return new THREE.Vector3(w.x, this.o.field.atOr(lng, lat, 0) + 0.3, w.z);
     });
     if (cursor) pts.push(cursor.clone().setY(cursor.y + 0.3));
+    if (this.polygonal && pts.length >= 3) pts.push(pts[0].clone());        // a ring closes on itself
     this.preview.geometry.dispose();
     this.preview.geometry = new THREE.BufferGeometry().setFromPoints(pts);
     this.preview.visible = pts.length >= 1;
   }
 
   finishLine() {
+    if (this.polygonal) {
+      if (this.drawing.length < 3) return;
+      const coords = this.drawing.slice();
+      this.drawing = [];
+      this.preview.visible = false;
+      if (this.tool === 'zone') {
+        const name = (this.o.ask?.('Name this territory', this.zone.name || this.zone.kind) ?? window.prompt('Name this territory', this.zone.name || this.zone.kind))?.trim() || this.zone.kind;
+        this.addZone(coords, name, this.zone.kind);
+      } else this.addShaping(coords, this.shape.op, this.shape.height, this.shape.edge);
+      return;
+    }
     if (this.drawing.length < 2) return;
     const kind = (this.tool === 'fence' || this.tool === 'path' || this.tool === 'road') ? this.tool : 'fence';
     const name = (this.o.ask?.(`Name this ${kind}`, kind) ?? window.prompt(`Name this ${kind}`, kind))?.trim() || kind;

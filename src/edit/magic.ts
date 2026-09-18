@@ -23,7 +23,9 @@ export type Action =
   | { type: 'line'; kind: 'fence' | 'path' | 'road'; name: string; points: [number, number][]; e?: number; n?: number }
   | { type: 'marker'; name: string; e?: number; n?: number }
   | { type: 'remove_trees'; radius_m: number; e?: number; n?: number }
-  | { type: 'plant_tree'; height_m: number; e?: number; n?: number };
+  | { type: 'plant_tree'; height_m: number; e?: number; n?: number }
+  | { type: 'zone'; name: string; kind: string; points: [number, number][]; e?: number; n?: number }
+  | { type: 'terrain'; op: 'flatten' | 'raise' | 'lower'; height_m: number; edge_m: number; points: [number, number][]; e?: number; n?: number };
 
 export interface Turn { role: 'you' | 'agent'; text: string; actions?: Action[]; taken?: boolean[]; at: number }
 
@@ -86,7 +88,7 @@ export class Magic {
     this.turns = [];
     if (id) {
       try { const raw = localStorage.getItem(KEY(id)); if (raw) this.turns = JSON.parse(raw); } catch { this.turns = []; }
-      if (!this.turns.length) this.turns.push({ role: 'agent', text: 'I am here. Tell me what you want at this spot — a block of some size, a fence, a marker, trees taken down — and I will lay it out for you to take or leave.', at: Date.now() });
+      if (!this.turns.length) this.turns.push({ role: 'agent', text: 'I am here. Tell me what you want at this spot — a block of some size, a fence, a marker, a territory, the ground flattened or raised, trees taken down — and I will lay it out for you to take or leave.', at: Date.now() });
     }
     this.render();
   }
@@ -164,6 +166,8 @@ export class Magic {
       case 'marker': ed.addNote(lng, lat, a.name || 'marker'); break;
       case 'remove_trees': ed.removeTreesAround(lng, lat, a.radius_m); break;
       case 'plant_tree': ed.addTree(lng, lat, a.height_m); break;
+      case 'zone': ed.addZone(a.points.map(([e, n]) => this.at(e, n)), a.name || a.kind, a.kind); break;
+      case 'terrain': ed.addShaping(a.points.map(([e, n]) => this.at(e, n)), a.op, a.height_m, a.edge_m); break;
       default: return false;
     }
     turn.taken![actionIndex] = true;
@@ -195,6 +199,8 @@ export class Magic {
         case 'marker': return `📍 marker “${esc(a.name)}”${where}`;
         case 'remove_trees': return `🌳 take down the trees within ${a.radius_m} m${where}`;
         case 'plant_tree': return `🌳 plant a ${a.height_m} m tree${where}`;
+        case 'zone': return `⬠ ${esc(a.kind)} “${esc(a.name)}”, ${a.points.length} corners`;
+        case 'terrain': return `⛰ ${a.op} the ground${a.op === 'flatten' ? '' : ` by ${a.height_m} m`} inside ${a.points.length} corners, bank ${a.edge_m} m`;
       }
     };
     const turns = this.turns.map((t, i) => `<div class="mg-turn ${t.role}">

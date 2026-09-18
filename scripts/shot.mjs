@@ -1,4 +1,4 @@
-// Look at the world: node scripts/shot.mjs "<url>" out.png [lng,lat,heading] [first|third|fly|edit|place|magic]
+// Look at the world: node scripts/shot.mjs "<url>" out.png [lng,lat,heading] [first|third|fly|edit|place|magic|ground]
 //
 //   `fly` takes off and looks down from 50 m; `edit` does that and opens the editor with a marker
 //   and a fence already made, so the panel and the drawn things are in the picture; `place` puts a
@@ -45,12 +45,12 @@ if (view === 'magic') {
     w.editor.openMagic(id);
   });
 }
-if (view === 'fly' || view === 'edit' || view === 'place') {
+if (view === 'fly' || view === 'edit' || view === 'place' || view === 'ground') {
   await page.evaluate(mode => {
     const w = window.world, p = w.player;
     p.setMode('fly');
-    p.key(' ', true); for (let i = 0; i < (mode === 'place' ? 2 : 4); i++) p.update(1); p.key(' ', false);   // up: update caps a step at a second
-    p.look(0, mode === 'place' ? 0.75 : 0.55);
+    p.key(' ', true); for (let i = 0; i < (mode === 'place' ? 2 : mode === 'ground' ? 3 : 4); i++) p.update(1); p.key(' ', false);   // up: update caps a step at a second
+    p.look(0, mode === 'place' ? 0.75 : mode === 'ground' ? 0.7 : 0.55);
     if (mode !== 'fly' && w.pack) {
       const s = w.state();
       const MX = 111320 * Math.cos(s.lat * Math.PI / 180), MY = 110574;
@@ -61,6 +61,15 @@ if (view === 'fly' || view === 'edit' || view === 'place') {
         w.editor.addNote(...off(12, 18), 'the gate');
         w.editor.addLine('fence', [off(-30, 8), off(-10, 14), off(10, 22), off(28, 24)], 'north fence');
         w.editor.addLine('path', [off(-6, -20), off(4, -2), off(12, 18)], 'to the gate');
+      } else if (mode === 'ground') {
+        // a pad flattened for the house on the slope, a raised bank behind it, and the orchard marked out
+        w.editor.addShaping([off(-12, 10), off(12, 10), off(12, 28), off(-12, 28)], 'flatten', 0, 4);
+        w.editor.addShaping([off(-30, 34), off(30, 34), off(30, 40), off(-30, 40)], 'raise', 1.5, 3);
+        w.editor.addZone([off(-45, -10), off(-18, -10), off(-18, 30), off(-45, 30)], 'the orchard', 'orchard');
+        w.editor.addZone([off(18, -10), off(48, -10), off(48, 18), off(18, 18)], 'kitchen garden', 'garden');
+        const id = w.editor.addBlock(...off(0, 19), { name: 'the new house', w: 14, d: 9, h: 4.5 }, s.headingDeg);
+        w.editor.setTool('terrain');
+        void id;
       } else {
         w.editor.setTool('block');
         const id = w.editor.addBlock(...off(0, 14), { name: 'the new house', w: 14, d: 9, h: 4.5 }, s.headingDeg);

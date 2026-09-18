@@ -743,6 +743,62 @@ check('magic: taking a proposal makes an ordinary unsaved edit at the right plac
   { east: boxed.east, north: boxed.north, dims: boxed.dims, marker: [boxed.markerName, boxed.markerEast], unsaved: [boxed.before.unsaved, boxed.unsaved], stored: boxed.stored });
 await page.evaluate(() => { const w = window.world; w.editor.openMagic(null); while (w.editor.unsaved) w.editor.undo(); });
 
+// ---- territories and the ground ------------------------------------------------------------------------------
+// A ring drawn on the ground is a translucent fill that lies on the hillside with a label. A ring
+// flattened is a pad: the ground inside it is level at the mean of its outline, the bank outside
+// eases back into the hill over three metres, and the terrain mesh, the trees and the walker all
+// follow because every one of them asks the same height function.
+const shaped = await page.evaluate(({ ring, pad, probe, inside, bank, far }) => {
+  const w = window.world, ed = w.editor;
+  w.setSession({ role: 'admin', pin: '4242' });
+  ed.setActive(true);
+  ed.addZone(ring, 'the orchard', 'orchard');
+  const zid = ed.edits[ed.edits.length - 1].properties.id;
+  const zone = w.today.group.getObjectByName(`zone:${zid}`);
+  const fill = zone && zone.children.find(c => c.geometry && c.geometry.getAttribute && c.geometry.getAttribute('position').count > 6);
+  let worst = 0, sampled = 0;
+  if (fill) { const pos = fill.geometry.getAttribute('position'); for (let i = 0; i < pos.count; i += 13) { const ll = w.frame.toLngLat(pos.getX(i), pos.getZ(i)); const t = w.field.atOr(ll.lng, ll.lat, NaN); if (isFinite(t)) { worst = Math.max(worst, Math.abs(pos.getY(i) - 0.08 - t)); sampled++; } } }
+  const zpick = ed.pick ? 'ok' : 'no';
+  // now the pad
+  const before = { inside: w.field.at(inside[0], inside[1]), bank: w.field.at(bank[0], bank[1]), far: w.field.at(far[0], far[1]), gen: w.field.shapingGen, fine: w.terrain.group.getObjectByName('terrain-fine').uuid };
+  const level = pad.map(([lng, lat]) => w.field.raw(lng, lat)).reduce((a, v) => a + v, 0) / pad.length;
+  ed.addShaping(pad, 'flatten', 0, 3);
+  const after = { inside: w.field.at(inside[0], inside[1]), bank: w.field.at(bank[0], bank[1]), far: w.field.at(far[0], far[1]), gen: w.field.shapingGen, fine: w.terrain.group.getObjectByName('terrain-fine').uuid, raw: w.field.raw(inside[0], inside[1]) };
+  // the terrain mesh at the pad's centre: find the nearest fine-ring vertex
+  const fine = w.terrain.group.getObjectByName('terrain-fine');
+  const pos = fine.geometry.getAttribute('position');
+  const c = w.frame.toWorld(inside[0], inside[1]);
+  let best = Infinity, meshY = NaN;
+  for (let i = 0; i < pos.count; i++) { const d = Math.hypot(pos.getX(i) - c.x, pos.getZ(i) - c.z); if (d < best) { best = d; meshY = pos.getY(i); } }
+  // the walker stands on the pad
+  w.goto(inside[0], inside[1], 0);
+  w.player.update(0.5);
+  const stood = w.state().groundM;
+  // the trees on the pad stand at the new ground
+  let treeWorst = 0, treesOn = 0;
+  for (const name of ['veg-oak', 'veg-shrub']) {
+    const m = w.vegetation.group.getObjectByName(name);
+    if (!m) continue;
+    const e = m.instanceMatrix.array;
+    for (let i = 0; i < m.count; i++) { const ll = w.frame.toLngLat(e[i * 16 + 12], e[i * 16 + 14]); const t = w.field.at(ll.lng, ll.lat); if (t != null && Math.abs(t - level) < 0.01) { treesOn++; treeWorst = Math.max(treeWorst, Math.abs(e[i * 16 + 13] - t)); } }
+  }
+  const hud = document.querySelector('[data-el="pack"]').textContent;
+  ed.undo();
+  const undone = { inside: w.field.at(inside[0], inside[1]), gen: w.field.shapingGen };
+  ed.undo();
+  return { zone: !!zone, fill: !!fill, worst: +worst.toFixed(3), sampled, zpick, before, after, level, meshY, meshD: +best.toFixed(2), stood, treesOn, treeWorst: +treeWorst.toFixed(3), hud, undone, probe };
+}, { ring: [at(-80, -20), at(-40, -20), at(-40, 10), at(-80, 10)], pad: [at(120, 40), at(140, 40), at(140, 60), at(120, 60)], inside: at(137, 45), bank: at(141.5, 50), far: at(150, 50), probe: at(137, 45) });
+check('territory: a ring drawn on the ground is a fill of metre cells lying on the hillside, with an outline and a label',
+  shaped.zone && shaped.fill && shaped.sampled > 20 && shaped.worst < 0.02, { zone: shaped.zone, fill: shaped.fill, sampled: shaped.sampled, worst: shaped.worst });
+check('ground: flattening a ring makes a pad at the mean level of its outline — the raw tiles untouched, the bank half way at 1.5 m out, the hill beyond untouched',
+  Math.abs(shaped.after.inside - shaped.level) < 0.01 && Math.abs(shaped.after.raw - shaped.before.inside) < 0.01 && Math.abs(shaped.before.inside - shaped.level) > 0.3
+    && Math.abs(shaped.after.bank - (shaped.before.bank + (shaped.level - shaped.before.bank) * 0.5)) < 0.05 && Math.abs(shaped.after.far - shaped.before.far) < 1e-9 && shaped.after.gen === shaped.before.gen + 1,
+  { level: +shaped.level.toFixed(2), inside: [+shaped.before.inside.toFixed(2), +shaped.after.inside.toFixed(2)], bank: [+shaped.before.bank.toFixed(2), +shaped.after.bank.toFixed(2)], far: [+shaped.before.far.toFixed(2), +shaped.after.far.toFixed(2)] });
+check('ground: the terrain mesh is sampled again, the walker stands on the pad, the trees on it stand at the new ground, and the HUD says the ground was shaped',
+  shaped.after.fine !== shaped.before.fine && shaped.meshD < 2 && Math.abs(shaped.meshY - shaped.level) < 0.01 && Math.abs(shaped.stood - shaped.level) < 0.05 && shaped.treesOn > 0 && shaped.treeWorst < 0.05 && /ground shaped/.test(shaped.hud),
+  { rebuilt: shaped.after.fine !== shaped.before.fine, meshY: +shaped.meshY.toFixed(2), meshD: shaped.meshD, stood: +shaped.stood.toFixed(2), treesOn: shaped.treesOn, treeWorst: shaped.treeWorst });
+check('ground: undo gives the hill back', Math.abs(shaped.undone.inside - shaped.before.inside) < 1e-9 && shaped.undone.gen === shaped.before.gen + 2, shaped.undone);
+
 // ---- a member reads --------------------------------------------------------------------------------------
 const read = await page.evaluate(() => {
   const w = window.world;

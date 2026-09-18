@@ -38,6 +38,7 @@ import { GroundGrid } from './edit/grid';
 import { Inspect } from './ui/inspect';
 import { CAPS, loadSession, saveSession, roleFor, type Session } from './world/roles';
 import { mergeChanges, type Structure, type StructureChange } from './world/structures';
+import { shapingFrom, type Shaping } from './world/shaping';
 import { Player } from './player/player';
 import { loadAvatar } from './player/avatar';
 import { Hud } from './ui/hud';
@@ -188,11 +189,22 @@ async function signIn() {
  * untouched — an edit never reaches them.
  */
 function rebuild(edits: Feature[], changes: StructureChange[]) {
+  if (pack) {
+    pack = applyEdits(pack, edits);
+    // the ground first: if it has been reshaped, the rings are sampled again and the hillside replanted
+    const gen = field.shapingGen;
+    field.setShapings(pack.terrain.features.map(f => shapingFrom(f, (lng, lat) => field.raw(lng, lat))).filter((x): x is Shaping => !!x));
+    if (field.shapingGen !== gen) {
+      terrain.reshape();
+      const p = player.position;
+      vegetation.build(p.x, p.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity, exclude: packRing() });
+      grid.visible = grid.visible;                // forgets its centre, so it is rebuilt on the next frame
+    }
+  }
   structures.list = mergeChanges(structuresBase, changes);
   structures.build(pid);
   player.solids = solidsFrom(structures.list, frame, field, pid);
   if (pack) {
-    pack = applyEdits(pack, edits);
     today.build(pack, tiles);
     player.solids = player.solids.concat(today.solids);
     vegetation.buildRecords(pack.trees.map(t => {
@@ -286,6 +298,11 @@ async function boot() {
     packUrl ? loadPack(packUrl) : Promise.resolve(null)
   ]);
   pack = loaded;
+  if (pack) {
+    // the pack's own shapings of the ground, before anything stands on it; the rings were built before the pack arrived
+    field.setShapings(pack.terrain.features.map(f => shapingFrom(f, (lng, lat) => field.raw(lng, lat))).filter((x): x is Shaping => !!x));
+    if (field.shapingGen) terrain.reshape();
+  }
   structuresBase = structures.list.slice();
   structures.build(area.pid);
   player.solids = solidsFrom(structures.list, frame, field, area.pid);
@@ -372,7 +389,8 @@ function packLine(p: PackData): string {
     bits.push(`${p.trees.length.toLocaleString()} trees (${String(L.trees?.captured ?? 'lidar')}${gone})`);
   }
   if (today.counts.buildings) bits.push(`${today.counts.buildings} standing`);
-  if (p.notes.features.length || p.lines.features.length) bits.push(`${p.notes.features.length + p.lines.features.length} marked`);
+  if (p.notes.features.length || p.lines.features.length || p.zones.features.length) bits.push(`${p.notes.features.length + p.lines.features.length + p.zones.features.length} marked`);
+  if (p.terrain.features.length) bits.push(`ground shaped ×${p.terrain.features.length}`);
   if (p.imagery) bits.push(`aerial ${p.imagery.captured ?? ''}`.trim());
   return `${p.manifest.name} · ${bits.join(' · ')}`;
 }

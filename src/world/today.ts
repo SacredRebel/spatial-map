@@ -21,7 +21,7 @@ export interface TodayTiles { asphalt?: THREE.Texture | null; asphaltMetres?: nu
 
 export interface TodayCounts {
   buildings: number; pads: number; monuments: number; roads: number; zones: number; lines: number;
-  notes: number; magic: number; drawn: number;
+  notes: number; magic: number; drawn: number; territories: number;
 }
 
 const ROOF = new THREE.Color('#8b7d6e');
@@ -32,6 +32,10 @@ const VIOLET = new THREE.Color('#a86bff');
 const TEAL = '#4fd1c5';
 const FENCE = new THREE.Color('#8a7355');
 const PATH = new THREE.Color('#c9b48e');
+/** a territory's colour by what it is for */
+const ZONE_COLOURS: Record<string, string> = {
+  zone: '#7fe0c8', garden: '#8ed47a', orchard: '#a3c95a', pasture: '#c9d47a', site: '#c9a2ff', camp: '#f0b070', water: '#6fb7e8', keep: '#f08a8a', forest: '#5aa86a'
+};
 const DIRT_ROAD = new THREE.Color('#b8a27c');
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
@@ -39,7 +43,7 @@ const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
 export class Today {
   group = new THREE.Group();
   solids: Solid[] = [];
-  counts: TodayCounts = { buildings: 0, pads: 0, monuments: 0, roads: 0, zones: 0, lines: 0, notes: 0, magic: 0, drawn: 0 };
+  counts: TodayCounts = { buildings: 0, pads: 0, monuments: 0, roads: 0, zones: 0, lines: 0, notes: 0, magic: 0, drawn: 0, territories: 0 };
   private disposables: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
 
   constructor(private frame: Frame, private field: HeightField) {
@@ -54,6 +58,7 @@ export class Today {
     this.zones(pack);
     this.notes(pack);
     this.drawn(pack);
+    this.territories(pack);
   }
 
   // ---- buildings --------------------------------------------------------------------------------
@@ -328,6 +333,69 @@ export class Today {
     }
   }
 
+  /**
+   * Territories drawn on the ground: a translucent fill that follows the hillside — a lattice of
+   * metre cells clipped to the polygon, every corner on the ground — an outline, and a label.
+   */
+  private territories(pack: PackData) {
+    for (const f of pack.zones.features) {
+      if (f.geometry.type !== 'Polygon' || !f.geometry.coordinates[0] || f.geometry.coordinates[0].length < 3) continue;
+      const id = String(f.properties.id || this.counts.territories);
+      const ring = f.geometry.coordinates[0].map(([lng, lat]) => this.frame.toWorld(lng, lat));
+      const xs = ring.map(p => p.x), zs = ring.map(p => p.z);
+      const x0 = Math.min(...xs), x1 = Math.max(...xs), z0 = Math.min(...zs), z1 = Math.max(...zs);
+      const span = Math.max(x1 - x0, z1 - z0);
+      const cell = span > 120 ? 4 : span > 60 ? 2 : 1;                       // at most a few thousand cells
+      const inside = (x: number, z: number) => {
+        let hit = false;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+          const a = ring[i], b = ring[j];
+          if ((a.z > z) !== (b.z > z) && x < ((b.x - a.x) * (z - a.z)) / (b.z - a.z) + a.x) hit = !hit;
+        }
+        return hit;
+      };
+      const h = (x: number, z: number) => { const ll = this.frame.toLngLat(x, z); return this.field.atOr(ll.lng, ll.lat, 0) + 0.08; };
+      const pos: number[] = [];
+      for (let x = Math.floor(x0 / cell) * cell; x < x1; x += cell) {
+        for (let z = Math.floor(z0 / cell) * cell; z < z1; z += cell) {
+          if (!inside(x + cell / 2, z + cell / 2)) continue;
+          const a = [x, h(x, z), z], b = [x + cell, h(x + cell, z), z], c = [x + cell, h(x + cell, z + cell), z + cell], d = [x, h(x, z + cell), z + cell];
+          pos.push(...a, ...c, ...b, ...a, ...d, ...c);                       // two triangles, facing up
+        }
+      }
+      const g = new THREE.Group();
+      g.name = `zone:${id}`;
+      const colour = new THREE.Color(String(f.properties.colour || ZONE_COLOURS[String(f.properties.kind || 'zone')] || '#7fe0c8'));
+      if (pos.length) {
+        const geo = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+        geo.computeVertexNormals();
+        const mat = new THREE.MeshBasicMaterial({ color: colour, transparent: true, opacity: 0.22, depthWrite: false, side: THREE.DoubleSide });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.renderOrder = 1;
+        g.add(mesh);
+        this.disposables.push(geo, mat);
+      }
+      const closed = f.geometry.coordinates[0].slice();
+      if (closed[0][0] !== closed[closed.length - 1][0] || closed[0][1] !== closed[closed.length - 1][1]) closed.push(closed[0]);
+      const outline = this.groundLine(closed, 0.2, 2);
+      const lgeo = new THREE.BufferGeometry().setFromPoints(outline);
+      const lmat = new THREE.LineBasicMaterial({ color: colour });
+      g.add(new THREE.Line(lgeo, lmat));
+      this.disposables.push(lgeo, lmat);
+      // the label at the centre of the ring
+      const cx = xs.reduce((a, v) => a + v, 0) / xs.length, cz = zs.reduce((a, v) => a + v, 0) / zs.length;
+      const tex = this.label(String(f.properties.name || f.properties.kind || 'zone'), false, '#' + colour.getHexString());
+      const sprMat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+      const spr = new THREE.Sprite(sprMat);
+      spr.scale.set(6, 1.5, 1);
+      spr.position.set(cx, h(cx, cz) + 1.6, cz);
+      g.add(spr);
+      this.disposables.push(tex, sprMat);
+      this.group.add(g);
+      this.counts.territories++;
+    }
+  }
+
   // ---- what is planned ------------------------------------------------------------------------------
   /** a post and a label at each placed zone — the placeholder a model will one day replace */
   private zones(pack: PackData) {
@@ -391,6 +459,6 @@ export class Today {
     for (const d of this.disposables) d.dispose();
     this.disposables = [];
     this.solids = [];
-    this.counts = { buildings: 0, pads: 0, monuments: 0, roads: 0, zones: 0, lines: 0, notes: 0, magic: 0, drawn: 0 };
+    this.counts = { buildings: 0, pads: 0, monuments: 0, roads: 0, zones: 0, lines: 0, notes: 0, magic: 0, drawn: 0, territories: 0 };
   }
 }

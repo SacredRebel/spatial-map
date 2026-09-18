@@ -77,9 +77,12 @@ export interface PackData {
   vision: FeatureCollection;
   /** the placed projects as they stand: moved or removed by edits */
   visionNow: FeatureCollection;
-  /** what the owner has pinned and drawn: markers with a label, fences, paths */
+  /** what the owner has pinned and drawn: markers with a label, fences, paths, territories */
   notes: FeatureCollection;
   lines: FeatureCollection;
+  zones: FeatureCollection;
+  /** the owner's shapings of the ground: pads flattened, banks raised, hollows cut */
+  terrain: FeatureCollection;
   /** the pack's own edits layer, as committed */
   edits: FeatureCollection;
   imagery: PackImagery | null;
@@ -146,8 +149,12 @@ export function parseTrees(csv: string, f: PackFrame): PackTree[] {
 //     add    · trees   — a Point with `height_m` and `crown_m`: a tree that is there now
 //     move   · vision  — `target`, the id of a placed project, and the Point it really goes at
 //     remove · vision  — `target`, the id of a placed project that is off the table
-//     add    · notes   — a Point with a `name`: a marker the owner pinned (a gate, a well, a photo)
+//     add    · notes   — a Point with a `name`: a marker the owner pinned (a gate, a well, a photo);
+//                        `kind: magic` is a box you talk to
 //     add    · lines   — a LineString with a `kind` (fence, path, road) and a `name`
+//     add    · zones   — a Polygon with a `name` and a `kind`: a territory drawn on the ground
+//     add    · terrain — a Polygon with `terrain_op` (flatten, raise, lower), `height_m` or `to_m`,
+//                        `edge_m`: the ground shaped, with a bank that eases into the hill
 //
 //   Applying them here, once, at load, means every consumer sees the same present.
 
@@ -237,6 +244,8 @@ export function applyEdits(pack: PackData, extra: Feature[] = []): PackData {
   };
   pack.notes = { type: 'FeatureCollection', features: all.filter(e => e.properties.op === 'add' && e.properties.layer === 'notes' && e.geometry.type === 'Point') };
   pack.lines = { type: 'FeatureCollection', features: all.filter(e => e.properties.op === 'add' && e.properties.layer === 'lines' && e.geometry.type === 'LineString') };
+  pack.zones = { type: 'FeatureCollection', features: all.filter(e => e.properties.op === 'add' && e.properties.layer === 'zones' && e.geometry.type === 'Polygon') };
+  pack.terrain = { type: 'FeatureCollection', features: all.filter(e => e.properties.op === 'add' && e.properties.layer === 'terrain' && e.geometry.type === 'Polygon') };
   return pack;
 }
 
@@ -278,6 +287,6 @@ export async function loadPack(url: string): Promise<PackData | null> {
   const record = treesCsv ? parseTrees(treesCsv, manifest.frame) : [];
   return applyEdits({
     base, manifest, record, trees: record, removed: 0, survey, county, roofs, vision,
-    visionNow: vision, notes: EMPTY, lines: EMPTY, edits, imagery, materials
+    visionNow: vision, notes: EMPTY, lines: EMPTY, zones: EMPTY, terrain: EMPTY, edits, imagery, materials
   });
 }
