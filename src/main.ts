@@ -280,23 +280,35 @@ function keepOut() {
 
 async function boot() {
   hud.setLoading('reading the ground…');
-  const index = await field.loadIndex();
+  // the pack first: it may say where its own ground is kept, and the world should not depend on
+  // the atlas answering to open at all
+  const loaded = packUrl ? await loadPack(packUrl) : null;
+  pack = loaded;
+  if (pack?.ground) field.useSource(pack.ground.index, pack.ground.template);
+  let index = await field.loadIndex();
+  const around = (deg: number): [number, number, number, number] => [start.lng - deg, start.lat - deg, start.lng + deg, start.lat + deg];
   if (!index) {
-    hud.setLoading(`no ground published at ${atlas} — the atlas has not baked this area yet.`);
-    return;
+    // the fine pyramid did not answer: open anyway on the coarse global ground and say so
+    index = field.coarseOnly();
+    if (!index) {
+      hud.setLoading(`no ground could be read from ${field.indexUrl.replace(/\/terrain\/index\.json$/, '')} — and no far source to fall back on.`);
+      return;
+    }
+    hud.setNotice(`the fine ground did not answer — walking on the coarse global set (about 10 m between samples). Reload to try again.`);
   }
-  const area = field.areaAt(start.lng, start.lat) || index.areas[0];
+  const area = field.coarse ? { pid: community.pid, bbox: around(0.006), tiles: 0 } : (field.areaAt(start.lng, start.lat) || index.areas[0]);
   pid = area.pid;
   // the property itself at full detail, then a wider box so the ground does not end at the fence,
   // then the valley and the ridges beyond it from the coarse global set — the horizon is real ground
-  await field.loadBox(area.bbox, index.maxzoom);
-  const pad = 0.004;
-  await field.loadBox(
-    [area.bbox[0] - pad, area.bbox[1] - pad, area.bbox[2] + pad, area.bbox[3] + pad],
-    Math.max(index.minzoom, index.maxzoom - 3)
-  );
-  const around = (deg: number): [number, number, number, number] => [start.lng - deg, start.lat - deg, start.lng + deg, start.lat + deg];
-  if (farSource) await Promise.all([field.loadBox(around(0.05), 12), field.loadBox(around(0.3), 10)]);
+  if (!field.coarse) {
+    await field.loadBox(area.bbox, index.maxzoom);
+    const pad = 0.004;
+    await field.loadBox(
+      [area.bbox[0] - pad, area.bbox[1] - pad, area.bbox[2] + pad, area.bbox[3] + pad],
+      Math.max(index.minzoom, index.maxzoom - 3)
+    );
+  }
+  if (farSource) await Promise.all([field.loadBox(around(0.01), 12), field.loadBox(around(0.05), 12), field.loadBox(around(0.3), 10)]);
 
   player.placeAt(start.lng, start.lat, start.heading);
   const p = player.position;
@@ -306,11 +318,7 @@ async function boot() {
   applySun();
 
   hud.setLoading('reading what is proposed here…');
-  const [, loaded] = await Promise.all([
-    structures.load(area.pid),
-    packUrl ? loadPack(packUrl) : Promise.resolve(null)
-  ]);
-  pack = loaded;
+  await structures.load(area.pid);
   if (pack) {
     // the pack's own shapings of the ground, before anything stands on it; the rings were built before the pack arrived
     field.setShapings(pack.terrain.features.map(f => shapingFrom(f, (lng, lat) => field.raw(lng, lat))).filter((x): x is Shaping => !!x));

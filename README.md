@@ -23,6 +23,12 @@ like one game and many maps.
 
 The first pack is [sulphur-mountain-world](https://github.com/SacredRebel/sulphur-mountain-world).
 
+## The link
+
+**https://spatial-map.vercel.app** — the production address, public, no login. The other addresses
+Vercel shows (`spatial-map-git-main-…`, `spatial-…-pauls-projects-…`) are preview deployments
+behind Vercel's own sign-in; they are for checking a build, not for sharing.
+
 ## Run it
 
 ```bash
@@ -121,6 +127,14 @@ pack…** (or **propose…**) sends the edits and the structure changes with the
 admin, or once an admin approves — commits the merged edits layer to the pack's repository and the
 merged registry to the atlas's. The record itself is never rewritten: the lidar's 3,663 trees stay
 in `trees.csv`; the edit is what takes one down.
+
+**The ground comes with the pack.** A pack may carry its own 1 m pyramid (`layers.terrain` with
+`kind: terrarium`, an `index` and a `template`, relative to the pack or absolute), and when it does
+the world reads the ground from there — Sulphur Mountain's thirteen tiles live in its own
+repository — and asks the atlas only for what is proposed. Without one, the atlas's pyramid is
+used. Either is asked three times before the world gives up on it, and if neither answers the
+world **still opens**, on the coarse global set (about 10 m between samples), with a notice at the
+top saying so; it never stops at a message when there is ground to stand on.
 
 ## How it is put together
 

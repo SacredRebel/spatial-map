@@ -67,6 +67,9 @@ export function start(port = PORT) {
         if (z !== Z) return send(res, 404, 'not baked');
         return send(res, 200, tilePng(z, x, y), TYPES['.png']);
       }
+      // the same plane at any zoom: a stand-in for the coarse global set, so the fallback can be tested
+      const coarse = /^\/coarse\/(\d+)\/(\d+)\/(\d+)\.png$/.exec(p);
+      if (coarse) { const [z, x, y] = coarse.slice(1).map(Number); return send(res, 200, tilePng(z, x, y), TYPES['.png']); }
       if (p.startsWith('/api/structures')) {
         return send(res, 200, JSON.stringify(STRUCTURES), TYPES['.json']);
       }

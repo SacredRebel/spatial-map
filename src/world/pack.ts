@@ -88,6 +88,8 @@ export interface PackData {
   /** the pack's own edits layer, as committed */
   edits: FeatureCollection;
   imagery: PackImagery | null;
+  /** where the pack keeps its own 1 m ground, when it does: a terrarium pyramid with an index */
+  ground: { index: string; template: string; maxzoom: number } | null;
   /** close-up materials by name (straw, dirt, gravel, litter, asphalt, bark), or none */
   materials: PackMaterials | null;
 }
@@ -310,9 +312,15 @@ export async function loadPack(url: string): Promise<PackData | null> {
     im && im.kind === 'xyz' && typeof im.template === 'string'
       ? { kind: 'xyz', template: im.template, maxzoom: Number(im.maxzoom) || 18, attribution: im.attribution as string | undefined, captured: im.captured as string | undefined }
       : null;
+  // the ground: a pack may carry its own pyramid (paths relative to the pack, or absolute)
+  const tl = L.terrain;
+  const abs = (u: unknown) => (typeof u === 'string' && u ? (/^https?:/.test(u) ? u : base + u) : null);
+  const ground = tl && String(tl.kind) === 'terrarium' && abs(tl.index) && abs(tl.template)
+    ? { index: abs(tl.index)!, template: abs(tl.template)!, maxzoom: Number(tl.maxzoom) || 17 }
+    : null;
   const record = treesCsv ? parseTrees(treesCsv, manifest.frame) : [];
   return applyEdits({
     base, manifest, record, trees: record, removed: 0, survey, county, roofs, vision,
-    visionNow: vision, notes: EMPTY, lines: EMPTY, zones: EMPTY, terrain: EMPTY, build: EMPTY, edits, imagery, materials
+    visionNow: vision, notes: EMPTY, lines: EMPTY, zones: EMPTY, terrain: EMPTY, build: EMPTY, edits, imagery, ground, materials
   });
 }

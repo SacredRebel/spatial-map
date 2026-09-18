@@ -44,25 +44,55 @@ export class HeightField {
   min = Infinity;
   max = -Infinity;
 
-  constructor(private origin: string, private far: FarSource | null = null) {}
+  /** where the fine pyramid comes from: the atlas by default, or wherever a pack says its ground is kept */
+  indexUrl: string;
+  template: string;
+  /** true when no fine pyramid could be read and the world is running on the far source alone */
+  coarse = false;
 
-  /** where a tile of this zoom comes from: the atlas's pyramid, or the far source below it */
+  constructor(origin: string, private far: FarSource | null = null) {
+    this.indexUrl = `${origin}/terrain/index.json`;
+    this.template = `${origin}/terrain/{z}/{x}/{y}.png`;
+  }
+
+  /** read the pyramid from somewhere else — a pack that carries its own tiles, say */
+  useSource(indexUrl: string, template: string) { this.indexUrl = indexUrl; this.template = template; }
+
+  /** where a tile of this zoom comes from: the fine pyramid, or the far source below it */
   private url(id: TileId): string | null {
     const min = this.index?.minzoom ?? 13;
-    if (id.z >= min) return `${this.origin}/terrain/${id.z}/${id.x}/${id.y}.png`;
+    if (id.z >= min && !this.coarse) return this.template.replace('{z}', String(id.z)).replace('{x}', String(id.x)).replace('{y}', String(id.y));
     if (this.far && id.z >= this.far.minzoom && id.z <= this.far.maxzoom) {
       return this.far.template.replace('{z}', String(id.z)).replace('{x}', String(id.x)).replace('{y}', String(id.y));
     }
     return null;
   }
 
-  async loadIndex(): Promise<Index | null> {
-    try {
-      const r = await fetch(`${this.origin}/terrain/index.json`);
-      if (!r.ok) return null;
-      this.index = await r.json();
-      return this.index;
-    } catch { return null; }
+  /** the pyramid's index; a network that answers late is asked again, twice, before giving up */
+  async loadIndex(tries = 3): Promise<Index | null> {
+    for (let i = 0; i < tries; i++) {
+      try {
+        const r = await fetch(this.indexUrl, { cache: i ? 'reload' : 'default' });
+        if (r.ok) {
+          const j = await r.json();
+          if (j && Array.isArray(j.areas)) { this.index = j; return this.index; }
+        }
+      } catch { /* try again */ }
+      if (i < tries - 1) await new Promise(res => setTimeout(res, 600 + 1200 * i));
+    }
+    return null;
+  }
+
+  /**
+   * No fine pyramid could be read: run on the far source alone. The ground is coarse — ten metres
+   * or so between samples — but the world opens, which beats a message. Returns null when there
+   * is no far source either.
+   */
+  coarseOnly(): Index | null {
+    if (!this.far) return null;
+    this.coarse = true;
+    this.index = { minzoom: 99, maxzoom: this.far.maxzoom, tileSize: SIZE, areas: [] };
+    return this.index;
   }
 
   /** the area whose box contains this point, if any */

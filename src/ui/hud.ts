@@ -42,7 +42,7 @@ export class Hud {
     this.root.className = 'hud';
     this.root.innerHTML = `
       <header class="hud-top">
-        <div class="brand"><span class="mark">◈</span><b>${esc(o.community)}</b><span class="sub">walkable world · v0.9</span></div>
+        <div class="brand"><span class="mark">◈</span><b>${esc(o.community)}</b><span class="sub">walkable world · v0.9.1</span></div>
         <div class="acts">
           <button class="btn" data-act="view" title="first / third person (C)">👤 view</button>
           <button class="btn" data-act="fly" data-el="fly" title="fly / walk (G)">🕊 fly</button>
@@ -91,6 +91,14 @@ export class Hud {
   setLoading(msg: string | null) {
     this.loading.hidden = msg == null;
     if (msg != null) (this.q('[data-el="loadmsg"]')).textContent = msg;
+  }
+
+  /** a line that stays: something the world had to do without, and what that means */
+  setNotice(text: string | null) {
+    let el = this.root.querySelector<HTMLElement>('[data-el="notice"]');
+    if (!el) { el = document.createElement('div'); el.className = 'notice'; el.dataset.el = 'notice'; this.root.appendChild(el); }
+    el.hidden = !text;
+    el.textContent = text ?? '';
   }
 
   /** say what the pack brought — the survey's date, the trees, the aerial — or nothing */

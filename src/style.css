@@ -165,3 +165,6 @@ canvas { display: block; touch-action: none; }
 .mg-say { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--line); }
 .mg-say input { flex: 1; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255,255,255,0.05); color: var(--ink); font: 500 12px var(--font); }
 @media (max-width: 640px) { .magic { left: 10px; right: 10px; width: auto; bottom: 150px; max-height: 46vh; } }
+
+/* v0.9.1: a notice that stays — the world opened without something it wanted */
+.hud .notice { position: absolute; left: 50%; top: 14px; transform: translateX(-50%); max-width: min(92vw, 560px); padding: 8px 14px; border-radius: 10px; background: rgba(120, 70, 20, 0.82); border: 1px solid rgba(255, 190, 90, 0.5); color: #ffe6c2; font: 500 12px var(--font); text-align: center; pointer-events: none; z-index: 5; }

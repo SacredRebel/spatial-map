@@ -998,6 +998,21 @@ const gone = await bare.evaluate(async (base) => {
 check('no aerial: when every tile fails the ring goes back to its slope colours', gone.tiles > 0 && gone.failed === gone.tiles && !gone.active && !gone.map && gone.vertexColours === true, gone);
 await bare.close();
 
+// ---- when the fine ground does not answer ------------------------------------------------------------
+// The atlas is down, or unreachable from where the person is: the world must still open. It falls
+// back to the coarse global set, says so in a notice, and stands the player on that ground.
+const down = await ctx.newPage();
+await down.goto(`${BASE}/?atlas=${BASE}/nowhere&community=sulphur-mountain&pack=${BASE}/pack/&far=${encodeURIComponent(`${BASE}/coarse/{z}/{x}/{y}.png`)}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+await down.waitForFunction(() => window.world && window.world.ready, { timeout: 60000 });
+const coarse = await down.evaluate(() => {
+  const w = window.world;
+  const s = w.state();
+  return { ready: w.ready, coarse: w.field.coarse, tiles: s.tiles, groundM: s.groundM, notice: document.querySelector('[data-el="notice"]')?.textContent, loading: document.querySelector('.loading').hidden, pack: !!w.pack, trees: w.pack ? w.pack.trees.length : 0, fine: !!w.terrain.group.getObjectByName('terrain-fine') };
+});
+check('fallback: with no fine pyramid the world still opens on the coarse set, says so, and the player stands on real ground',
+  coarse.ready && coarse.coarse && coarse.tiles > 0 && Math.abs(coarse.groundM - truth(ORIGIN.lng, ORIGIN.lat)) < 1.5 && /coarse/.test(coarse.notice || '') && coarse.loading && coarse.pack && coarse.trees > 0 && coarse.fine, coarse);
+await down.close();
+
 // ---- the sun ----------------------------------------------------------------------------------
 const sun = await page.evaluate(() => {
   const out = [];
