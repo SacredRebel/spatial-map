@@ -52,6 +52,8 @@ const send = (res, code, body, type) => {
   res.end(body);
 };
 
+export const FIXTURE_PIN = '4242';
+
 export function start(port = PORT) {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, `http://localhost:${port}`);
@@ -66,6 +68,18 @@ export function start(port = PORT) {
       }
       if (p.startsWith('/api/structures')) {
         return send(res, 200, JSON.stringify(STRUCTURES), TYPES['.json']);
+      }
+      // the atlas's save endpoint, as the world sees it: the PIN is checked, the features are kept
+      if (p === '/api/pack/edits' && req.method === 'POST') {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        let body = {};
+        try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return send(res, 400, JSON.stringify({ ok: false, error: 'bad_json' }), TYPES['.json']); }
+        if (body.pin !== FIXTURE_PIN) return send(res, 401, JSON.stringify({ ok: false, error: 'bad_pin' }), TYPES['.json']);
+        if (body.pack !== 'fixture-pack') return send(res, 404, JSON.stringify({ ok: false, error: 'unknown_pack' }), TYPES['.json']);
+        if (!Array.isArray(body.features) || !body.features.length) return send(res, 400, JSON.stringify({ ok: false, error: 'no_features' }), TYPES['.json']);
+        server.saved.push(...body.features);
+        return send(res, 200, JSON.stringify({ ok: true, count: body.features.length, commit: 'f1x7ur3000000' }), TYPES['.json']);
       }
       // the fixture data pack, and the aerial it names
       const pk = /^\/pack\/([a-z.]+)$/.exec(p);
@@ -101,6 +115,8 @@ export function start(port = PORT) {
       return send(res, 404, 'not found');
     }
   });
+  /** what the mock atlas has been asked to commit */
+  server.saved = [];
   return new Promise(resolve => server.listen(port, () => resolve(server)));
 }
 

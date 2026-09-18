@@ -17,6 +17,10 @@ export interface HudOpts {
   onTime: (hours: number) => void;
   onView: () => void;
   onRecentre: () => void;
+  /** fly / walk (G) */
+  onFly: () => void;
+  /** edit mode on / off (B) */
+  onEdit: () => void;
 }
 
 export class Hud {
@@ -36,9 +40,11 @@ export class Hud {
     this.root.className = 'hud';
     this.root.innerHTML = `
       <header class="hud-top">
-        <div class="brand"><span class="mark">◈</span><b>${esc(o.community)}</b><span class="sub">walkable world · v0.4</span></div>
+        <div class="brand"><span class="mark">◈</span><b>${esc(o.community)}</b><span class="sub">walkable world · v0.5</span></div>
         <div class="acts">
           <button class="btn" data-act="view" title="first / third person (C)">👤 view</button>
+          <button class="btn" data-act="fly" data-el="fly" title="fly / walk (G)">🕊 fly</button>
+          <button class="btn" data-act="edit" data-el="edit" title="edit the world (B)">✎ edit</button>
           <button class="btn" data-act="recentre" title="back to the start">⌖ recentre</button>
         </div>
       </header>
@@ -52,7 +58,7 @@ export class Hud {
         <div class="who" data-el="avatar" hidden></div>
       </div>
       <div class="readout" data-el="readout"></div>
-      <div class="keys">W A S D move · <b>Shift</b> run · <b>Space</b> jump · <b>C</b> first person · drag or click to look · wheel to zoom out</div>
+      <div class="keys" data-el="keys">W A S D move · <b>Shift</b> run · <b>Space</b> jump · <b>C</b> first person · <b>G</b> fly · <b>B</b> edit · drag or click to look · wheel to zoom out</div>
       <div class="loading" data-el="loading"><div class="spin"></div><span data-el="loadmsg">reading the ground…</span></div>`;
     container.appendChild(this.root);
 
@@ -65,6 +71,8 @@ export class Hud {
 
     this.q('[data-act="view"]').addEventListener('click', () => o.onView());
     this.q('[data-act="recentre"]').addEventListener('click', () => o.onRecentre());
+    this.q('[data-act="fly"]').addEventListener('click', () => o.onFly());
+    this.q('[data-act="edit"]').addEventListener('click', () => o.onEdit());
     const time = this.q('[data-el="time"]') as HTMLInputElement;
     this.clock.textContent = `${pad(o.hours)}:${pad((o.hours % 1) * 60)}`;
     time.addEventListener('input', () => {
@@ -93,6 +101,17 @@ export class Hud {
     this.avatarLine.textContent = kind === 'vrm' ? 'VRM avatar' : kind === 'gltf' ? 'glTF avatar' : '';
   }
 
+  /** light up the fly and edit buttons when they are on, and say what the keys do now */
+  setMode(flying: boolean, editing: boolean) {
+    this.q('[data-el="fly"]').classList.toggle('on', flying);
+    this.q('[data-el="edit"]').classList.toggle('on', editing);
+    this.q('[data-el="keys"]').innerHTML = editing
+      ? 'click to select or place · <b>1–6</b> tools · <b>Enter</b> finish a line · <b>Esc</b> cancel · <b>Ctrl Z</b> undo · right-drag to look · <b>B</b> leave edit'
+      : flying
+        ? 'W A S D fly · <b>Space</b> up · <b>X</b> down · <b>Shift</b> fast · <b>Q E</b> turn · wheel speed · <b>G</b> land · <b>B</b> edit'
+        : 'W A S D move · <b>Shift</b> run · <b>Space</b> jump · <b>C</b> first person · <b>G</b> fly · <b>B</b> edit · drag or click to look · wheel to zoom out';
+  }
+
   setSun(altitude: number, azimuth: number) {
     const dir = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(azimuth / 45) % 8];
     this.sunLine.textContent = altitude < -0.5
@@ -108,7 +127,9 @@ export class Hud {
       this.frames = 0; this.last = now;
     }
     const ft = Math.round(s.groundM * 3.28084);
+    const fly = s.mode === 'fly' ? `<span class="fly">flying · <b>${s.heightM.toFixed(0)} m</b> up · ${s.flySpeed.toFixed(0)} m/s</span>` : '';
     this.readout.innerHTML =
+      fly +
       `<span><b>${s.groundM.toFixed(1)} m</b> <i>${ft} ft</i></span>` +
       `<span>${s.lat.toFixed(6)}, ${s.lng.toFixed(6)}</span>` +
       `<span>heading <b>${s.headingDeg.toFixed(0)}°</b> · ${s.speed.toFixed(1)} m/s</span>` +

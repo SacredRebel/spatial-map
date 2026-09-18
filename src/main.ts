@@ -8,6 +8,10 @@
 //   URL: ?community=sulphur-mountain&at=<lng>,<lat>,<heading>&t=<hours>&avatar=<url>&atlas=<origin>
 //        &pack=<url of a data pack, or 0 for none>&far=<a coarse terrain template for the horizon, or 0>
 //
+//   G flies (god mode: anywhere, any height); B edits. Edits are features of the pack's own edits
+//   layer, drawn on top of the record the moment they are made, kept in the browser until they are
+//   saved to the pack through the atlas with the owner's PIN.
+//
 //   A community may also have a PACK — one repository of that property's ground truth (the
 //   surveyed line, the roofs the lidar measured, every tree it saw, the road, the placed zones).
 //   Where the pack speaks, the world listens to it instead of guessing: the real trees stand where
@@ -23,9 +27,11 @@ import { Sky } from './world/sky';
 import { instantAt } from './world/sun';
 import { Structures } from './world/structures';
 import { solidsFrom } from './world/collide';
-import { loadPack, type PackData } from './world/pack';
-import { Today } from './world/today';
+import { loadPack, applyEdits, type PackData, type Feature } from './world/pack';
+import { Today, type TodayTiles } from './world/today';
 import { loadGrain, loadTile } from './world/grain';
+import { Editor } from './edit/editor';
+import { Panel } from './edit/panel';
 import { Player } from './player/player';
 import { loadAvatar } from './player/avatar';
 import { Hud } from './ui/hud';
@@ -104,6 +110,8 @@ const structures = new Structures(frame, field, atlas);
 const today = new Today(frame, field);
 const player = new Player(frame, field, camera, renderer.domElement);
 let pack: PackData | null = null;
+/** the close-up tiles the standing things carry, kept so a rebuild can carry them again */
+let tiles: TodayTiles = {};
 
 scene.add(terrain.group, vegetation.group, structures.group, today.group, player.object);
 sky.addTo(scene);
@@ -117,8 +125,36 @@ const hud = new Hud(app, {
   hours: clockHours,
   onTime: h => { clockHours = h; applySun(); },
   onView: () => player.toggleView(),
-  onRecentre: () => player.placeAt(start.lng, start.lat, start.heading)
+  onRecentre: () => player.placeAt(start.lng, start.lat, start.heading),
+  onFly: () => player.toggleMode(),
+  onEdit: () => editor.toggle()
 });
+
+const editor = new Editor({
+  dom: renderer.domElement, camera, frame, field, player, vegetation, today, scene, atlas,
+  pack: () => pack,
+  rebuild: extra => rebuild(extra),
+  onChange: () => { panel.render(); hud.setMode(player.mode === 'fly', editor.active); }
+});
+const panel = new Panel(app, editor, () => window.prompt('The atlas PIN, to commit these edits to the pack:'));
+
+/**
+ * Redraw everything the record and the edits together decide: the trees that stand, the projects
+ * where they now are, the markers and the lines. The ground, the sky and the county's buildings
+ * are untouched — an edit never reaches them.
+ */
+function rebuild(extra: Feature[]) {
+  if (!pack) return;
+  pack = applyEdits(pack, extra);
+  const base = player.solids.filter(s => !today.solids.includes(s));
+  today.build(pack, tiles);
+  player.solids = base.concat(today.solids);
+  vegetation.buildRecords(pack.trees.map(t => {
+    const w = frame.toWorld(t.lng, t.lat);
+    return { x: w.x, z: w.z, height: t.height, crown: t.crown };
+  }));
+  hud.setPack(packLine(pack));
+}
 
 const stick = new Stick(app, {
   onAxis: (fwd, side, run) => player.setAxis(fwd, side, run),
@@ -212,7 +248,8 @@ async function boot() {
       loadGrain(pack.materials),
       loadTile(pack.materials?.asphalt?.albedo_512 || pack.materials?.asphalt?.albedo)
     ]);
-    today.build(pack, { asphalt, asphaltMetres: pack.materials?.asphalt?.metres });
+    tiles = { asphalt, asphaltMetres: pack.materials?.asphalt?.metres };
+    today.build(pack, tiles);
     if (grain) terrain.setGrain(grain);
     player.solids = player.solids.concat(today.solids);
     // the record's trees, at their own positions; the rule keeps out of the pack's ground
@@ -222,6 +259,8 @@ async function boot() {
     }));
     if (pack.imagery) terrain.setImagery({ template: pack.imagery.template, maxzoom: pack.imagery.maxzoom });
     hud.setPack(packLine(pack));
+    // the edits made here last time and not yet saved come back on top of the record
+    editor.restore();
   }
 
   hud.setLoading('planting…');
@@ -242,6 +281,7 @@ async function boot() {
 
 let ready = false;
 let last = performance.now();
+let shownMode = '';
 
 function loop() {
   requestAnimationFrame(loop);
@@ -260,6 +300,8 @@ function loop() {
     sky.sun.target.position.set(p.x, p.y, p.z);
     sky.sun.position.copy(sky.sun.target.position).addScaledVector(sky.dir, 900);
     hud.frame(player.state(), field.loadedTiles);
+    const m = `${player.mode}/${editor.active}`;
+    if (m !== shownMode) { shownMode = m; hud.setMode(player.mode === 'fly', editor.active); }
   }
   renderer.render(scene, camera);
 }
@@ -280,15 +322,18 @@ function packLine(p: PackData): string {
     bits.push(`${p.trees.length.toLocaleString()} trees (${String(L.trees?.captured ?? 'lidar')}${gone})`);
   }
   if (today.counts.buildings) bits.push(`${today.counts.buildings} standing`);
+  if (p.notes.features.length || p.lines.features.length) bits.push(`${p.notes.features.length + p.lines.features.length} marked`);
   if (p.imagery) bits.push(`aerial ${p.imagery.captured ?? ''}`.trim());
   return `${p.manifest.name} · ${bits.join(' · ')}`;
 }
 
 // a small surface for tests and for the Playground shell to drive
 const api = {
-  player, frame, field, terrain, vegetation, structures, today, sky, scene, camera, renderer, stick,
+  player, frame, field, terrain, vegetation, structures, today, sky, scene, camera, renderer, stick, editor,
   get ready() { return ready; },
   get pack() { return pack; },
+  /** apply the editor's unsaved edits (or any list of edit features) on top of the record and redraw */
+  rebuild: (extra: Feature[] = editor.edits) => { rebuild(extra); return pack; },
   state: () => ({ ...player.state(), tiles: field.loadedTiles, community: slug, atlas }),
   goto: (lng: number, lat: number, heading = 0) => player.placeAt(lng, lat, heading),
   setTime: (h: number) => { clockHours = h; applySun(); },

@@ -11,6 +11,11 @@
 //   Movement arrives as an AXIS, not as keys. Keys set the axis, a thumbstick sets the axis, and a
 //   test sets the axis, so all three go through exactly the same arithmetic and a phone walks at
 //   the same speed as a keyboard.
+//
+//   There is also a FLY mode — the god mode of a building game. No gravity, no walls, the camera
+//   goes where you point it at whatever speed the wheel has set. It is for looking at the land
+//   and for editing it, not for being in it; leaving it drops the body onto the ground under the
+//   camera, and the walk resumes from there.
 
 import * as THREE from 'three';
 import type { Frame } from '../world/geo';
@@ -24,22 +29,35 @@ const WALK = 1.6, RUN = 5.2, GRAVITY = -18, JUMP = 5.4;
 const EYE = 1.68, BODY = 1.8, SHOULDER = 0.34;
 const LOOK = 0.0022, TOUCH_LOOK = 0.006;
 const PITCH_MIN = -1.15, PITCH_MAX = 0.9;
+const FLY_PITCH = 1.5, FLY_SPEED = 12, FLY_MIN = 2, FLY_MAX = 120, FLY_FAST = 4;
 const SUBSTEP = 1 / 20;            // the physics runs at 20 Hz however fast the page draws
 
 export type View = 'third' | 'first';
+export type Mode = 'walk' | 'fly';
 
 export interface PlayerState {
   lng: number; lat: number; groundM: number; headingDeg: number;
   speed: number; view: View; grounded: boolean;
   /** the id of the building being leaned on, if any */
   touching: string | null;
+  mode: Mode;
+  /** metres above the ground, when flying */
+  heightM: number;
+  flySpeed: number;
 }
 
 export class Player {
   readonly object = new THREE.Group();
   rig: AvatarRig = new CapsuleRig();
   view: View = 'third';
+  mode: Mode = 'walk';
+  flySpeed = FLY_SPEED;
   camDist = 6.4;
+  /**
+   * When the editor is up, the left button is for picking, not for looking: looking around is on
+   * the right button, and a click does not grab the pointer.
+   */
+  editing = false;
   /** buildings that stop you; set by main once the registry has loaded */
   solids: Solid[] = [];
   private pos = new THREE.Vector3();
@@ -99,13 +117,40 @@ export class Player {
     const ll = this.frame.toLngLat(this.pos.x, this.pos.z);
     return {
       lng: ll.lng, lat: ll.lat, groundM: this.ground, headingDeg: this.headingDeg,
-      speed: Math.hypot(this.vel.x, this.vel.z), view: this.view, grounded: this.grounded,
-      touching: this.touching
+      speed: this.mode === 'fly' ? this.vel.length() : Math.hypot(this.vel.x, this.vel.z), view: this.view, grounded: this.grounded,
+      touching: this.touching, mode: this.mode, heightM: Math.max(0, this.pos.y - this.ground), flySpeed: this.flySpeed
     };
   }
 
-  setView(v: View) { this.view = v; this.rig.object.visible = v === 'third'; this.sync(); }
+  setView(v: View) { this.view = v; this.rig.object.visible = v === 'third' && this.mode === 'walk'; this.sync(); }
   toggleView() { this.setView(this.view === 'third' ? 'first' : 'third'); }
+
+  /** walk or fly. Taking off lifts the eye a little; landing drops the body to the ground below. */
+  setMode(m: Mode) {
+    if (m === this.mode) return;
+    this.mode = m;
+    this.vel.set(0, 0, 0);
+    if (m === 'fly') {
+      this.pos.y = Math.max(this.pos.y, this.ground) + 1.2;
+      this.rig.object.visible = false;
+    } else {
+      const ll = this.frame.toLngLat(this.pos.x, this.pos.z);
+      this.ground = this.field.atOr(ll.lng, ll.lat, this.ground);
+      this.pos.y = this.ground;
+      this.grounded = true;
+      this.pitch = THREE.MathUtils.clamp(this.pitch, PITCH_MIN, PITCH_MAX);
+      this.rig.object.visible = this.view === 'third';
+    }
+    this.sync();
+  }
+  toggleMode() { this.setMode(this.mode === 'walk' ? 'fly' : 'walk'); }
+
+
+  /** where the camera is and the way it looks — the editor casts its rays from here */
+  get eye(): { position: THREE.Vector3; direction: THREE.Vector3 } {
+    const dir = new THREE.Vector3(-Math.sin(this.yaw) * Math.cos(this.pitch), Math.sin(this.pitch), -Math.cos(this.yaw) * Math.cos(this.pitch));
+    return { position: this.camera.position.clone(), direction: dir.normalize() };
+  }
 
   // ---- input ---------------------------------------------------------------------------------
   private wire() {
@@ -114,6 +159,7 @@ export class Player {
       if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
       const k = e.key.toLowerCase();
       if (k === 'c') { this.toggleView(); return; }
+      if (k === 'g') { this.toggleMode(); return; }
       if (!MOVE.has(k)) return;
       e.preventDefault();
       this.keys.add(k);
@@ -123,9 +169,10 @@ export class Player {
     window.addEventListener('keyup', up);
     window.addEventListener('blur', () => this.keys.clear());
 
-    this.dom.addEventListener('click', () => { if (!this.locked) void this.dom.requestPointerLock?.(); });
+    this.dom.addEventListener('click', () => { if (!this.locked && !this.editing) void this.dom.requestPointerLock?.(); });
     document.addEventListener('pointerlockchange', () => { this.locked = document.pointerLockElement === this.dom; });
-    this.dom.addEventListener('mousedown', () => { this.dragging = true; });
+    this.dom.addEventListener('mousedown', e => { if (!this.editing || e.button === 2) this.dragging = true; });
+    this.dom.addEventListener('contextmenu', e => { if (this.editing) e.preventDefault(); });
     window.addEventListener('mouseup', () => { this.dragging = false; });
     window.addEventListener('mousemove', e => {
       if (!this.locked && !this.dragging) return;
@@ -142,15 +189,23 @@ export class Player {
     }, { passive: true });
     this.dom.addEventListener('touchend', () => { this.lastTouch = null; }, { passive: true });
     this.dom.addEventListener('wheel', e => {
+      if (this.mode === 'fly') {
+        e.preventDefault();
+        this.flySpeed = THREE.MathUtils.clamp(this.flySpeed * (e.deltaY > 0 ? 0.8 : 1.25), FLY_MIN, FLY_MAX);
+        return;
+      }
       if (this.view !== 'third') return;
       e.preventDefault();
       this.camDist = THREE.MathUtils.clamp(this.camDist + Math.sign(e.deltaY) * 0.6, 1.6, 14);
     }, { passive: false });
   }
 
-  private look(dx: number, dy: number) {
+  /** turn and tilt the view by so many radians — the mouse's way in, and a script's (dy > 0 looks down) */
+  look(dx: number, dy: number) {
     this.yaw -= dx;
-    this.pitch = THREE.MathUtils.clamp(this.pitch - dy, PITCH_MIN, PITCH_MAX);
+    const lim = this.mode === 'fly' ? FLY_PITCH : 1;
+    this.pitch = THREE.MathUtils.clamp(this.pitch - dy, this.mode === 'fly' ? -lim : PITCH_MIN, this.mode === 'fly' ? lim : PITCH_MAX);
+    if (this.mode === 'fly') this.sync();
   }
 
   /** press or release a movement key without an event — for on-screen controls and for tests */
@@ -188,7 +243,7 @@ export class Player {
     const total = Math.min(Math.max(dt, 0), 1);
     const steps = Math.max(1, Math.ceil(total / SUBSTEP));
     const d = total / steps;
-    for (let i = 0; i < steps; i++) this.step(d);
+    for (let i = 0; i < steps; i++) { if (this.mode === 'fly') this.fly(d); else this.step(d); }
     this.sync();
     const moved = this.travelled - this.lastTravelled;
     this.lastTravelled = this.travelled;
@@ -196,6 +251,34 @@ export class Player {
       dt: total, distance: moved,
       speed: Math.hypot(this.vel.x, this.vel.z), grounded: this.grounded
     });
+  }
+
+  /** the flying step: along the look direction, up and down on Space and X, no ground at all */
+  private fly(d: number) {
+    let fwd = this.axis.fwd, side = this.axis.side, up = 0;
+    if (this.keys.has('w') || this.keys.has('arrowup')) fwd += 1;
+    if (this.keys.has('s') || this.keys.has('arrowdown')) fwd -= 1;
+    if (this.keys.has('d') || this.keys.has('arrowright')) side += 1;
+    if (this.keys.has('a') || this.keys.has('arrowleft')) side -= 1;
+    if (this.keys.has(' ')) up += 1;
+    if (this.keys.has('x')) up -= 1;
+    if (this.keys.has('q')) this.yaw += 1.6 * d;
+    if (this.keys.has('e')) this.yaw -= 1.6 * d;
+    fwd = THREE.MathUtils.clamp(fwd, -1, 1); side = THREE.MathUtils.clamp(side, -1, 1);
+    const speed = this.flySpeed * ((this.keys.has('shift') || this.axis.run) ? FLY_FAST : 1);
+    const look = this.eye.direction;
+    const right = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+    const v = new THREE.Vector3().addScaledVector(look, fwd).addScaledVector(right, side);
+    v.y += up;
+    if (v.lengthSq() > 1) v.normalize();
+    v.multiplyScalar(speed);
+    this.vel.copy(v);
+    this.pos.addScaledVector(v, d);
+    const ll = this.frame.toLngLat(this.pos.x, this.pos.z);
+    this.ground = this.field.atOr(ll.lng, ll.lat, this.ground);
+    if (this.pos.y < this.ground + 0.5) this.pos.y = this.ground + 0.5;    // never under the hill
+    this.grounded = false;
+    this.touching = null;
   }
 
   private step(d: number) {
@@ -241,6 +324,12 @@ export class Player {
     this.object.position.copy(this.pos);
     this.object.rotation.y = this.yaw;
     const eye = this.pos.y + EYE;
+    if (this.mode === 'fly') {
+      this.camera.position.copy(this.pos);
+      this.camera.lookAt(this.camera.position.clone().add(this.eye.direction));
+      this.onChange(this.state());
+      return;
+    }
     if (this.view === 'first') {
       this.camera.position.set(this.pos.x, eye, this.pos.z);
       const dir = new THREE.Vector3(-Math.sin(this.yaw), Math.tan(this.pitch), -Math.cos(this.yaw));
@@ -259,4 +348,4 @@ export class Player {
   }
 }
 
-const MOVE = new Set(['w', 'a', 's', 'd', 'q', 'e', 'shift', ' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright']);
+const MOVE = new Set(['w', 'a', 's', 'd', 'q', 'e', 'x', 'shift', ' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright']);

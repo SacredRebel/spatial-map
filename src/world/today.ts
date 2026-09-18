@@ -21,6 +21,7 @@ export interface TodayTiles { asphalt?: THREE.Texture | null; asphaltMetres?: nu
 
 export interface TodayCounts {
   buildings: number; pads: number; monuments: number; roads: number; zones: number; lines: number;
+  notes: number; drawn: number;
 }
 
 const ROOF = new THREE.Color('#8b7d6e');
@@ -28,13 +29,17 @@ const METAL = new THREE.Color('#9aa0a3');
 const CONCRETE = new THREE.Color('#b9b5ae');
 const ASPHALT = new THREE.Color('#4b4a47');
 const VIOLET = new THREE.Color('#a86bff');
+const TEAL = '#4fd1c5';
+const FENCE = new THREE.Color('#8a7355');
+const PATH = new THREE.Color('#c9b48e');
+const DIRT_ROAD = new THREE.Color('#b8a27c');
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 
 export class Today {
   group = new THREE.Group();
   solids: Solid[] = [];
-  counts: TodayCounts = { buildings: 0, pads: 0, monuments: 0, roads: 0, zones: 0, lines: 0 };
+  counts: TodayCounts = { buildings: 0, pads: 0, monuments: 0, roads: 0, zones: 0, lines: 0, notes: 0, drawn: 0 };
   private disposables: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
 
   constructor(private frame: Frame, private field: HeightField) {
@@ -47,6 +52,8 @@ export class Today {
     this.survey(pack);
     this.roads(pack, tiles);
     this.zones(pack);
+    this.notes(pack);
+    this.drawn(pack);
   }
 
   // ---- buildings --------------------------------------------------------------------------------
@@ -181,12 +188,21 @@ export class Today {
   // ---- roads ----------------------------------------------------------------------------------------
   /** a strip of a fixed width laid along the centreline, hugging the ground */
   private roads(pack: PackData, tiles: TodayTiles) {
-    const metres = tiles.asphaltMetres || 3;
     for (const f of pack.county.features) {
       if (f.properties.layer !== 'road' || f.geometry.type !== 'LineString') continue;
-      const centre = this.groundLine(f.geometry.coordinates, 0, 3);
-      if (centre.length < 2) continue;
-      const half = 2.2;
+      const mesh = this.strip(f.geometry.coordinates, 4.4, tiles.asphalt ? '#ffffff' : ASPHALT, tiles.asphalt || null, tiles.asphaltMetres || 3);
+      if (!mesh) continue;
+      mesh.name = `road:${slug(String(f.properties.name || 'road'))}`;
+      this.counts.roads++;
+    }
+  }
+
+  /** a strip of a fixed width laid along a line, hugging the ground: a road, a path, a track */
+  private strip(coords: [number, number][], width: number, colour: THREE.ColorRepresentation, map: THREE.Texture | null, metres: number): THREE.Mesh | null {
+    {
+      const centre = this.groundLine(coords, 0, 3);
+      if (centre.length < 2) return null;
+      const half = width / 2;
       const pos: number[] = [];
       const uv: number[] = [];
       let along = 0;
@@ -216,22 +232,81 @@ export class Today {
       geo.setIndex(idx);
       geo.computeVertexNormals();
       const mat = new THREE.MeshLambertMaterial({
-        color: tiles.asphalt ? '#ffffff' : ASPHALT, map: tiles.asphalt || null,
+        color: colour, map,
         side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1
       });
       const mesh = new THREE.Mesh(geo, mat);
       mesh.receiveShadow = true;
-      mesh.name = `road:${slug(String(f.properties.name || 'road'))}`;
       this.group.add(mesh);
       this.disposables.push(geo, mat);
-      this.counts.roads++;
+      return mesh;
+    }
+  }
+
+  // ---- what the owner pinned and drew ---------------------------------------------------------------
+  /** a marker with a label: a gate, a well, a fence corner, "photo taken here" */
+  private notes(pack: PackData) {
+    for (const f of pack.notes.features) {
+      if (f.geometry.type !== 'Point') continue;
+      const [lng, lat] = f.geometry.coordinates;
+      const w = this.frame.toWorld(lng, lat);
+      const marker = new THREE.Group();
+      marker.name = `note:${String(f.properties.id || this.counts.notes)}`;
+      marker.position.set(w.x, this.field.atOr(lng, lat, 0), w.z);
+      const postGeo = new THREE.CylinderGeometry(0.04, 0.04, 1.6, 8);
+      const postMat = new THREE.MeshLambertMaterial({ color: TEAL });
+      const post = new THREE.Mesh(postGeo, postMat);
+      post.position.y = 0.8;
+      post.castShadow = true;
+      marker.add(post);
+      const tex = this.label(String(f.properties.name || 'note'), false, TEAL);
+      const sprMat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+      const spr = new THREE.Sprite(sprMat);
+      spr.scale.set(4.5, 1.125, 1);
+      spr.position.y = 2.2;
+      marker.add(spr);
+      this.group.add(marker);
+      this.disposables.push(postGeo, postMat, tex, sprMat);
+      this.counts.notes++;
+    }
+  }
+
+  /** fences as posts and a rail, paths and dirt roads as strips on the ground */
+  private drawn(pack: PackData) {
+    for (const f of pack.lines.features) {
+      if (f.geometry.type !== 'LineString' || f.geometry.coordinates.length < 2) continue;
+      const kind = String(f.properties.kind || 'fence');
+      const id = String(f.properties.id || this.counts.drawn);
+      if (kind === 'fence') {
+        const g = new THREE.Group();
+        g.name = `line:${id}`;
+        const rail = this.groundLine(f.geometry.coordinates, 1.1, 2);
+        const geo = new THREE.BufferGeometry().setFromPoints(rail);
+        const mat = new THREE.LineBasicMaterial({ color: FENCE });
+        g.add(new THREE.Line(geo, mat));
+        const posts = this.groundLine(f.geometry.coordinates, 0, 3);
+        const postGeo = new THREE.CylinderGeometry(0.05, 0.05, 1.3, 6);
+        const postMat = new THREE.MeshLambertMaterial({ color: FENCE });
+        const inst = new THREE.InstancedMesh(postGeo, postMat, posts.length);
+        const m = new THREE.Matrix4();
+        posts.forEach((p, i) => inst.setMatrixAt(i, m.makeTranslation(p.x, p.y + 0.65, p.z)));
+        inst.castShadow = true;
+        g.add(inst);
+        this.group.add(g);
+        this.disposables.push(geo, mat, postGeo, postMat);
+      } else {
+        const mesh = this.strip(f.geometry.coordinates, kind === 'road' ? 3.5 : 1.2, kind === 'road' ? DIRT_ROAD : PATH, null, 2);
+        if (!mesh) continue;
+        mesh.name = `line:${id}`;
+      }
+      this.counts.drawn++;
     }
   }
 
   // ---- what is planned ------------------------------------------------------------------------------
   /** a post and a label at each placed zone — the placeholder a model will one day replace */
   private zones(pack: PackData) {
-    for (const f of pack.vision.features) {
+    for (const f of pack.visionNow.features) {
       if (f.geometry.type !== 'Point') continue;
       const [lng, lat] = f.geometry.coordinates;
       const w = this.frame.toWorld(lng, lat);
@@ -261,7 +336,7 @@ export class Today {
     }
   }
 
-  private label(text: string, standing: boolean): THREE.CanvasTexture {
+  private label(text: string, standing: boolean, edge?: string): THREE.CanvasTexture {
     const c = document.createElement('canvas');
     c.width = 512; c.height = 128;
     const g = c.getContext('2d')!;
@@ -272,7 +347,7 @@ export class Today {
     g.lineTo(512, 128 - r); g.quadraticCurveTo(512, 128, 512 - r, 128);
     g.lineTo(r, 128); g.quadraticCurveTo(0, 128, 0, 128 - r);
     g.lineTo(0, r); g.quadraticCurveTo(0, 0, r, 0); g.closePath(); g.fill();
-    g.strokeStyle = standing ? '#e0b64a' : '#a86bff';
+    g.strokeStyle = edge || (standing ? '#e0b64a' : '#a86bff');
     g.lineWidth = 4; g.stroke();
     g.fillStyle = '#f2efe6';
     g.font = `${standing ? '700' : '600'} 40px -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif`;
@@ -291,6 +366,6 @@ export class Today {
     for (const d of this.disposables) d.dispose();
     this.disposables = [];
     this.solids = [];
-    this.counts = { buildings: 0, pads: 0, monuments: 0, roads: 0, zones: 0, lines: 0 };
+    this.counts = { buildings: 0, pads: 0, monuments: 0, roads: 0, zones: 0, lines: 0, notes: 0, drawn: 0 };
   }
 }

@@ -64,14 +64,23 @@ export type PackMaterials = Record<string, PackMaterial>;
 export interface PackData {
   base: string;
   manifest: PackManifest;
-  /** the trees as they stand: the record with the owner's edits applied */
+  /** every tree the lidar saw — the record, never rewritten */
+  record: PackTree[];
+  /** the trees as they stand: the record with the edits applied */
   trees: PackTree[];
   /** how many of the record's trees an edit took down */
   removed: number;
   survey: FeatureCollection;
   county: FeatureCollection;
   roofs: FeatureCollection;
+  /** the placed projects as the atlas placed them */
   vision: FeatureCollection;
+  /** the placed projects as they stand: moved or removed by edits */
+  visionNow: FeatureCollection;
+  /** what the owner has pinned and drawn: markers with a label, fences, paths */
+  notes: FeatureCollection;
+  lines: FeatureCollection;
+  /** the pack's own edits layer, as committed */
   edits: FeatureCollection;
   imagery: PackImagery | null;
   /** close-up materials by name (straw, dirt, gravel, litter, asphalt, bark), or none */
@@ -130,9 +139,17 @@ export function parseTrees(csv: string, f: PackFrame): PackTree[] {
 // ---- what the owner has said differs from the record ----------------------------------------------
 //
 //   The record is never rewritten. A lidar flight is a fact about one day; what has changed since is
-//   another fact, dated and attributed, and it lives in its own layer. Each edit is one feature:
-//   `op` ("remove"), the `layer` it applies to, and either a Point with `radius_m` or a Polygon with
-//   `buffer_m`. Applying them here, once, at load, means every consumer sees the same present.
+//   another fact, dated and attributed, and it lives in its own layer. Each edit is one feature with
+//   an `op` and a `layer`:
+//
+//     remove · trees   — a Point with `radius_m`, or a Polygon with `buffer_m`: those tree tops are gone
+//     add    · trees   — a Point with `height_m` and `crown_m`: a tree that is there now
+//     move   · vision  — `target`, the id of a placed project, and the Point it really goes at
+//     remove · vision  — `target`, the id of a placed project that is off the table
+//     add    · notes   — a Point with a `name`: a marker the owner pinned (a gate, a well, a photo)
+//     add    · lines   — a LineString with a `kind` (fence, path, road) and a `name`
+//
+//   Applying them here, once, at load, means every consumer sees the same present.
 
 type XY = { x: number; y: number };
 
@@ -158,11 +175,17 @@ function ringDistance(p: XY, ring: XY[]): number {
   return best;
 }
 
-/** Apply the pack's edits to its trees. Returns what stands, and how many the edits took down. */
-export function applyEdits(trees: PackTree[], edits: FeatureCollection, f: PackFrame): { trees: PackTree[]; removed: number } {
+/** Apply tree edits to the record. Returns what stands, and how many the edits took down. */
+export function applyTreeEdits(trees: PackTree[], edits: Feature[], f: PackFrame): { trees: PackTree[]; removed: number } {
   const toXY = ([lng, lat]: [number, number]): XY => ({ x: (lng - f.origin_lng) * f.metres_per_deg_lng, y: (lat - f.origin_lat) * f.metres_per_deg_lat });
-  const removals = edits.features.filter(e => e.properties.op === 'remove' && (e.properties.layer ?? 'trees') === 'trees');
-  if (!removals.length) return { trees, removed: 0 };
+  const removals = edits.filter(e => e.properties.op === 'remove' && (e.properties.layer ?? 'trees') === 'trees');
+  const additions = edits.filter(e => e.properties.op === 'add' && e.properties.layer === 'trees' && e.geometry.type === 'Point');
+  const added: PackTree[] = additions.map(e => {
+    const [lng, lat] = (e.geometry as { coordinates: [number, number] }).coordinates;
+    const h = Number(e.properties.height_m) || 6;
+    return { lng, lat, height: h, crown: Number(e.properties.crown_m) || Math.max(1, h / 3), ground: NaN };
+  });
+  if (!removals.length) return { trees: trees.concat(added), removed: 0 };
   const gone = (t: PackTree): boolean => {
     const p = toXY([t.lng, t.lat]);
     for (const e of removals) {
@@ -179,7 +202,42 @@ export function applyEdits(trees: PackTree[], edits: FeatureCollection, f: PackF
     return false;
   };
   const kept = trees.filter(t => !gone(t));
-  return { trees: kept, removed: trees.length - kept.length };
+  return { trees: kept.concat(added), removed: trees.length - kept.length };
+}
+
+/**
+ * Apply every edit — the pack's own layer plus any the editor holds unsaved — and write the
+ * present into the pack: the trees that stand, the projects where they now go, the notes and
+ * the lines. Called at load and again after every edit, so what you see is always the record
+ * plus the edits and never a third thing.
+ */
+export function applyEdits(pack: PackData, extra: Feature[] = []): PackData {
+  const all = pack.edits.features.concat(extra);
+  const t = applyTreeEdits(pack.record, all, pack.manifest.frame);
+  pack.trees = t.trees;
+  pack.removed = t.removed;
+  const moved = new Map<string, [number, number]>();
+  const dropped = new Set<string>();
+  for (const e of all) {
+    if (e.properties.layer !== 'vision') continue;
+    // the project is named by `target`; older edits named it by `id`
+    const who = typeof e.properties.target === 'string' ? e.properties.target : typeof e.properties.id === 'string' ? e.properties.id : null;
+    if (!who) continue;
+    if (e.properties.op === 'move' && e.geometry.type === 'Point') moved.set(who, e.geometry.coordinates);
+    if (e.properties.op === 'remove') dropped.add(who);
+  }
+  pack.visionNow = {
+    type: 'FeatureCollection',
+    features: pack.vision.features
+      .filter(f => !dropped.has(String(f.properties.id)))
+      .map(f => {
+        const to = moved.get(String(f.properties.id));
+        return to && f.geometry.type === 'Point' ? { ...f, properties: { ...f.properties, moved: true }, geometry: { type: 'Point', coordinates: to } } : f;
+      })
+  };
+  pack.notes = { type: 'FeatureCollection', features: all.filter(e => e.properties.op === 'add' && e.properties.layer === 'notes' && e.geometry.type === 'Point') };
+  pack.lines = { type: 'FeatureCollection', features: all.filter(e => e.properties.op === 'add' && e.properties.layer === 'lines' && e.geometry.type === 'LineString') };
+  return pack;
 }
 
 /** the directory the manifest lives in, whether the url named the file or the folder */
@@ -218,6 +276,8 @@ export async function loadPack(url: string): Promise<PackData | null> {
       ? { kind: 'xyz', template: im.template, maxzoom: Number(im.maxzoom) || 18, attribution: im.attribution as string | undefined, captured: im.captured as string | undefined }
       : null;
   const record = treesCsv ? parseTrees(treesCsv, manifest.frame) : [];
-  const { trees, removed } = applyEdits(record, edits, manifest.frame);
-  return { base, manifest, trees, removed, survey, county, roofs, vision, edits, imagery, materials };
+  return applyEdits({
+    base, manifest, record, trees: record, removed: 0, survey, county, roofs, vision,
+    visionNow: vision, notes: EMPTY, lines: EMPTY, edits, imagery, materials
+  });
 }

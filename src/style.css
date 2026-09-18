@@ -84,3 +84,35 @@ canvas { display: block; touch-action: none; }
   .readout { right: 92px; bottom: 96px; font-size: 10px; }
   .time { width: min(232px, 54vw); }
 }
+
+/* the editor: a column of tools and what is selected, down the right */
+.btn.on { color: var(--ink); border-color: #4fd1c5; box-shadow: inset 0 0 0 1px rgba(79,209,197,0.35); }
+.btn.gold { border-color: var(--gold); color: var(--ink); }
+.btn:disabled { opacity: 0.45; cursor: default; }
+.edit-panel { position: fixed; top: 52px; right: 14px; width: 272px; max-height: calc(100vh - 140px); overflow: auto; padding: 10px 12px; border-radius: 12px; background: var(--panel); border: 1px solid rgba(79,209,197,0.35); z-index: 3; font-size: 12px; color: var(--ink-2); }
+.edit-panel[hidden] { display: none; }
+.ep-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.ep-head b { color: #4fd1c5; letter-spacing: 0.04em; text-transform: uppercase; font-size: 11px; }
+.ep-head span { color: var(--ink-3); font-size: 11px; flex: 1; }
+.ep-x { background: none; border: 0; color: var(--ink-3); font-size: 16px; cursor: pointer; padding: 0 4px; }
+.ep-x:hover { color: var(--ink); }
+.ep-tools { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.ep-tool { font: 600 11px var(--font); padding: 6px 4px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255,255,255,0.03); color: var(--ink-2); cursor: pointer; }
+.ep-tool:hover { color: var(--ink); }
+.ep-tool.on { border-color: #4fd1c5; color: var(--ink); background: rgba(79,209,197,0.12); }
+.ep-hint { margin: 6px 0 8px; color: var(--ink-3); font-size: 11px; }
+.ep-note { margin: 0 0 8px; padding: 6px 8px; border-radius: 8px; background: rgba(79,209,197,0.1); color: var(--ink); font-size: 11.5px; }
+.ep-note b { color: #4fd1c5; }
+.ep-sel { padding: 8px; border-radius: 8px; border: 1px solid var(--line); margin-bottom: 8px; color: var(--ink); }
+.ep-sel small { color: var(--ink-3); font-family: var(--mono); font-size: 10px; }
+.ep-sel.muted, .muted { color: var(--ink-3); }
+.ep-row { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.ep-list { margin-bottom: 8px; max-height: 150px; overflow: auto; font-size: 11px; }
+.ep-item { padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
+.ep-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.ep-save { margin-top: 8px; font-size: 11px; }
+.ep-save.ok { color: #7fe0c8; }
+.ep-save.bad { color: #f0a070; }
+@media (max-width: 640px) {
+  .edit-panel { left: 10px; right: 10px; width: auto; top: auto; bottom: 10px; max-height: 46vh; }
+}

@@ -57,6 +57,22 @@ By default it reads the live atlas. Point it somewhere else with `?atlas=`:
 **W A S D** move · **Shift** run · **Space** jump · **C** first person · **Q E** turn · drag or click
 to look around · wheel to pull the camera back. Touch: one finger looks.
 
+**G** flies — god mode. Anywhere, any height, no ground: **W A S D** along the look, **Space** up,
+**X** down, **Shift** fast, wheel for speed, **G** again to land where you are.
+
+**B** edits. The world becomes something you can correct: click a tree and mark it gone; pick up a
+project's post and put it where it really goes; pin a marker with a name (the gate, the well, the
+place a photograph was taken); draw a fence, a path, a road. Tools on **1–6**, **Enter** finishes a
+line, **Esc** cancels, **Ctrl Z** undoes. In edit mode the left button selects and places and the
+right button looks around.
+
+Every edit is one feature of the pack's own `edits.geojson` grammar (`op` × `layer`: remove or add
+trees, move or remove a project, add a marker, add a line), applied on top of the record the moment
+it is made, kept in the browser until it is saved, and downloadable as `edits.geojson`. **Save to
+pack…** sends them with the owner's PIN to the atlas's `POST /api/pack/edits`, which validates
+each one and commits the merged layer to the pack's repository. The record itself is never
+rewritten: the lidar's 3,663 trees stay in `trees.csv`; the edit is what takes one down.
+
 ## How it is put together
 
 **`world/geo.ts`** — the local frame. Each community has an origin, and everything inside the world
@@ -133,6 +149,13 @@ draws, so a laptop at four frames a second walks at the same speed as a workstat
 draws: reserved ground, a massing block, or a real `.glb`. The glTF loader is imported only when
 there is a model to load.
 
+**`edit/editor.ts`** — the pencil. Picking is a raycast against the record's instanced trees (the
+instance id maps back to the row of the record) and the standing things, and for the ground a march
+along the ray against the height function, which is exact and needs no mesh. Every action is one
+edit feature with its own id, `by: owner`, and the date; undo pops the last; the unsaved list lives
+in `localStorage` per pack and comes back on reload, minus anything the pack has since taken in.
+**`edit/panel.ts`** is the view of it.
+
 ## Testing
 
 `npm test` serves a **synthetic hillside** — a tilted plane, base 500 m, rising 5 % east and falling
@@ -145,8 +168,9 @@ generated on the spot by `tests/fixture.mjs` — no binaries in the repo, nothin
 ## Looking at a pack
 
 `PACK_DIR=../sulphur-mountain-world node tests/serve.mjs` serves a pack from disk at
-`/realpack/`, and `node scripts/shot.mjs "<url>" out.png [lng,lat,heading]` boots the built world
-against it headless and writes a screenshot.
+`/realpack/`, and `node scripts/shot.mjs "<url>" out.png [lng,lat,heading] [first|third|fly|edit]`
+boots the built world against it headless and writes a screenshot — `fly` from 50 m up, `edit` with
+the editor open and a marker, a fence and a path already drawn.
 
 ## What is next
 
@@ -159,8 +183,8 @@ against it headless and writes a screenshot.
   land's own grain.
 - **The house.** The new build as a `.glb`, sited from the surveyed line and never from the county
   ring, in the atlas's registry so it appears here the moment it is placed there.
-- **Reconciliation.** The lidar is 2018. A way to stand at a tree and say *this one is gone*, and
-  have the pack remember.
+- **More to edit.** Buildings that are gone or new (a footprint drawn on the ground with a height),
+  a tree's real height, a photograph pinned to its marker.
 - **Real collision.** three-mesh-bvh against the models once there are models.
 - **Presence.** Seeing each other: position, heading and animation state at about 10 Hz.
 

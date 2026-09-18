@@ -7,7 +7,7 @@
 import { chromium } from 'playwright';
 import { existsSync } from 'fs';
 import { start } from './serve.mjs';
-import { height, ORIGIN, PACK_TREES, PACK_STANDING, removedByEdits, PACK_HOUSE, PACK_GARAGE, PACK_AOI } from './fixture.mjs';
+import { height, ORIGIN, PACK_TREES, PACK_STANDING, removedByEdits, PACK_HOUSE, PACK_GARAGE, PACK_AOI, at } from './fixture.mjs';
 
 const PORT = 5181;
 const BASE = `http://localhost:${PORT}`;
@@ -466,6 +466,136 @@ check('grain: the ground in front of the feet draws as lit straw, not black and 
 
 const hudPack = await page.evaluate(() => { const el = document.querySelector('[data-el="pack"]'); return { hidden: el.hidden, text: el.textContent }; });
 check('pack: the HUD says what the pack brought, and what has gone since', !hudPack.hidden && /Fixture Hill/.test(hudPack.text) && /37 trees/.test(hudPack.text) && /3 since gone/.test(hudPack.text), hudPack);
+
+// ---- god mode: flying ---------------------------------------------------------------------------
+// G leaves the ground. In the air there is no gravity, Space climbs, W goes where you look, and
+// landing puts the body back on the surface exactly.
+const flight = await page.evaluate(() => {
+  const w = window.world, p = w.player;
+  w.goto(-119.156345, 34.432675, 0);
+  const g0 = p.state();
+  p.setMode('fly');
+  const up0 = p.state();
+  p.update(1);                                   // a second of nothing: no falling
+  const hang = p.state();
+  p.key(' ', true); p.update(1); p.key(' ', false);
+  const climbed = p.state();
+  p.key('w', true); p.update(1); p.key('w', false);
+  const forward = p.state();
+  p.setMode('walk');
+  const landed = p.state();
+  return { g0, up0, hang, climbed, forward, landed, ground: w.state().groundM };
+});
+check('fly: taking off lifts the eye above the ground and nothing pulls it back down',
+  flight.g0.mode === 'walk' && flight.up0.mode === 'fly' && flight.up0.heightM > 1 && Math.abs(flight.hang.heightM - flight.up0.heightM) < 0.01,
+  { off: +flight.up0.heightM.toFixed(2), hang: +flight.hang.heightM.toFixed(2) });
+check('fly: Space climbs, W flies along the heading, and the height readout is metres over the ground below',
+  flight.climbed.heightM - flight.hang.heightM > 8 && (flight.forward.lat - flight.climbed.lat) * MY > 8 && Math.abs(flight.forward.lng - flight.climbed.lng) * MX < 0.5,
+  { climb: +(flight.climbed.heightM - flight.hang.heightM).toFixed(1), north: +((flight.forward.lat - flight.climbed.lat) * MY).toFixed(1) });
+check('fly: landing drops the body onto the surface under it',
+  flight.landed.mode === 'walk' && flight.landed.grounded && Math.abs(flight.landed.groundM - truth(flight.landed.lng, flight.landed.lat)) < 0.05,
+  { y: +flight.landed.groundM.toFixed(2), truth: +truth(flight.landed.lng, flight.landed.lat).toFixed(2) });
+
+// ---- the editor: picking --------------------------------------------------------------------------
+// Stand 15 m south of a known tree, facing it. Its canopy projected to the screen must pick that
+// tree and no other; the ground picked at the screen's centre must be on the surface.
+const treeAt = (e, n) => PACK_STANDING.findIndex(t => t.e === e && t.n === n);
+const pickTree = await page.evaluate(({ tree, from }) => {
+  const w = window.world, ed = w.editor;
+  w.goto(from[0], from[1], 0);
+  w.player.setView('first');                      // the eye itself, so no tree stands between it and the target
+  w.renderer.render(w.scene, w.camera);
+  ed.setActive(true);
+  const t = w.pack.trees[tree];
+  const wp = w.frame.toWorld(t.lng, t.lat);
+  const y = w.field.atOr(t.lng, t.lat, 0) + t.height * 0.7;
+  const v = new (Object.getPrototypeOf(w.camera.position).constructor)(wp.x, y, wp.z).project(w.camera);
+  const r = w.renderer.domElement.getBoundingClientRect();
+  const sx = r.left + (v.x + 1) / 2 * r.width, sy = r.top + (1 - v.y) / 2 * r.height;
+  const hit = ed.pick(sx, sy);
+  const centre = ed.pick(r.left + r.width / 2, r.top + r.height * 0.86);   // low on the screen: the ground a few metres ahead
+  return { active: ed.active, editing: w.player.editing, panel: !document.querySelector('.edit-panel').hidden, sx, sy, kind: hit?.kind, index: hit?.index, height: hit?.tree?.height, centre: centre && { kind: centre.kind, lng: centre.lng, lat: centre.lat, y: centre.point?.y } };
+}, { tree: treeAt(70, -40), from: at(70, -52) });
+check('edit: B puts the world in edit mode — the panel opens, the walker stops grabbing the mouse',
+  pickTree.active && pickTree.editing && pickTree.panel, { active: pickTree.active, editing: pickTree.editing, panel: pickTree.panel });
+check('edit: the tree under the cursor is picked back to its own row of the record',
+  pickTree.kind === 'tree' && pickTree.index === treeAt(70, -40) && pickTree.height === PACK_STANDING[treeAt(70, -40)].height,
+  { kind: pickTree.kind, index: pickTree.index, want: treeAt(70, -40) });
+check('edit: a click on open ground lands on the surface, not above it or below it',
+  pickTree.centre?.kind === 'ground' && Math.abs(pickTree.centre.y - truth(pickTree.centre.lng, pickTree.centre.lat)) < 0.05,
+  pickTree.centre && { y: +pickTree.centre.y.toFixed(2), truth: +truth(pickTree.centre.lng, pickTree.centre.lat).toFixed(2) });
+
+// ---- the editor: every edit ---------------------------------------------------------------------
+const edited = await page.evaluate(({ tree, moveTo, noteAt, plantAt, fence }) => {
+  const w = window.world, ed = w.editor;
+  const before = { trees: w.pack.trees.length, removed: w.pack.removed, zones: w.today.counts.zones };
+  ed.markGone(w.pack.trees[tree]);
+  const gone = { trees: w.pack.trees.length, removed: w.pack.removed, hud: document.querySelector('[data-el="pack"]').textContent };
+  ed.moveVision('retreat', moveTo[0], moveTo[1]);
+  const post = w.today.group.getObjectByName('vision:retreat');
+  const want = w.frame.toWorld(moveTo[0], moveTo[1]);
+  const moved = { dx: post.position.x - want.x, dz: post.position.z - want.z, flagged: w.pack.visionNow.features.find(f => f.properties.id === 'retreat').properties.moved === true, zones: w.today.counts.zones };
+  ed.addNote(noteAt[0], noteAt[1], 'the gate');
+  const noteId = ed.edits[ed.edits.length - 1].properties.id;
+  const note = w.today.group.getObjectByName(`note:${noteId}`);
+  const nw = w.frame.toWorld(noteAt[0], noteAt[1]);
+  const noted = { found: !!note, dx: note ? note.position.x - nw.x : null, y: note?.position.y, ground: w.field.atOr(noteAt[0], noteAt[1], NaN), count: w.today.counts.notes };
+  ed.addTree(plantAt[0], plantAt[1], 7);
+  const planted = { trees: w.pack.trees.length, last: w.pack.trees[w.pack.trees.length - 1], drawn: w.vegetation.counts.record_oak + w.vegetation.counts.record_shrub };
+  ed.addLine('fence', fence, 'north fence');
+  const lineId = ed.edits[ed.edits.length - 1].properties.id;
+  const drawn = { found: !!w.today.group.getObjectByName(`line:${lineId}`), count: w.today.counts.drawn };
+  const stored = JSON.parse(localStorage.getItem(`spatial-map:edits:${w.pack.manifest.id}`) || '[]');
+  const ops = ed.edits.map(f => `${f.properties.op}:${f.properties.layer}`);
+  const stamped = ed.edits.every(f => /^e-/.test(f.properties.id) && f.properties.by === 'owner' && f.properties.authority === 'owner' && /^\d{4}-\d\d-\d\d$/.test(f.properties.reported))
+    && ed.edits.find(f => f.properties.op === 'move').properties.target === 'retreat';
+  ed.undo();
+  const undone = { found: !!w.today.group.getObjectByName(`line:${lineId}`), count: w.today.counts.drawn, edits: ed.edits.length };
+  return { before, gone, moved, noted, planted, drawn, stored: stored.length, ops, stamped, undone };
+}, { tree: treeAt(70, -40), moveTo: at(-60, -60), noteAt: at(-20, 50), plantAt: at(-70, 10), fence: [at(-90, 90), at(-40, 90), at(-40, 60)] });
+check('edit: marking a tree gone takes it out of the world and the HUD counts it among the gone',
+  edited.gone.trees === edited.before.trees - 1 && edited.gone.removed === edited.before.removed + 1 && /4 since gone/.test(edited.gone.hud),
+  { trees: [edited.before.trees, edited.gone.trees], removed: [edited.before.removed, edited.gone.removed] });
+check('edit: a project picked up and put down stands at the new place and is marked as moved',
+  Math.abs(edited.moved.dx) < 0.01 && Math.abs(edited.moved.dz) < 0.01 && edited.moved.flagged && edited.moved.zones === edited.before.zones,
+  { dx: +edited.moved.dx.toFixed(3), dz: +edited.moved.dz.toFixed(3), flagged: edited.moved.flagged });
+check('edit: a marker is a post on the ground with its name, where the click was',
+  edited.noted.found && Math.abs(edited.noted.dx) < 0.01 && Math.abs(edited.noted.y - edited.noted.ground) < 0.05 && edited.noted.count === 1,
+  { dx: edited.noted.dx, y: edited.noted.y, ground: edited.noted.ground });
+check('edit: a planted tree joins the record\'s trees at its height and is drawn with them',
+  edited.planted.trees === edited.gone.trees + 1 && edited.planted.last.height === 7 && edited.planted.drawn === edited.planted.trees,
+  { trees: edited.planted.trees, drawn: edited.planted.drawn, height: edited.planted.last.height });
+check('edit: a fence is drawn where it was traced, and undo takes it away again',
+  edited.drawn.found && edited.drawn.count === 1 && !edited.undone.found && edited.undone.count === 0 && edited.undone.edits === 4,
+  { drawn: edited.drawn, undone: edited.undone });
+check('edit: every edit is one feature of the pack\'s own vocabulary — its own id, the project it moves named as target — stamped as the owner\'s and kept in the browser',
+  edited.ops.join(' ') === 'remove:trees move:vision add:notes add:trees add:lines' && edited.stamped && edited.stored === 5,
+  { ops: edited.ops, stamped: edited.stamped, stored: edited.stored });
+
+// ---- the editor: what survives a reload, and what a save does --------------------------------------
+await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
+await page.waitForFunction(() => window.world && window.world.ready, { timeout: 45000 });
+await page.waitForTimeout(300);
+const back = await page.evaluate(() => {
+  const w = window.world;
+  return { edits: w.editor.edits.length, trees: w.pack.trees.length, removed: w.pack.removed, notes: w.today.counts.notes, moved: !!w.pack.visionNow.features.find(f => f.properties.id === 'retreat').properties.moved };
+});
+check('edit: unsaved edits come back after a reload, applied on top of the record again',
+  back.edits === 4 && back.trees === PACK_STANDING.length && back.removed === 4 && back.notes === 1 && back.moved, back);
+
+const saved = await page.evaluate(async () => {
+  const w = window.world, ed = w.editor;
+  const wrong = await ed.save('0000');
+  const still = ed.edits.length;
+  const right = await ed.save('4242');
+  return { wrong, still, right, edits: ed.edits.length, inPack: w.pack.edits.features.length, trees: w.pack.trees.length, removed: w.pack.removed, notes: w.today.counts.notes, stored: localStorage.getItem(`spatial-map:edits:${w.pack.manifest.id}`) };
+});
+check('save: the wrong PIN is refused and nothing is lost', !saved.wrong.ok && /wrong PIN/.test(saved.wrong.message) && saved.still === 4, saved.wrong);
+check('save: the right PIN commits the edits to the pack — they leave the unsaved list, join the pack\'s edits layer, and the world does not change',
+  saved.right.ok && saved.edits === 0 && saved.inPack === 3 + 4 && saved.trees === PACK_STANDING.length && saved.removed === 4 && saved.notes === 1 && saved.stored === '[]' && server.saved.length === 4,
+  { ...saved.right, inPack: saved.inPack, sent: server.saved.length });
+check('save: what reached the atlas is exactly what was made here', server.saved.every(f => f.type === 'Feature' && f.properties.by === 'owner') && server.saved.map(f => f.properties.op).join(' ') === 'remove move add add', server.saved.map(f => `${f.properties.op}:${f.properties.layer}`));
+await page.evaluate(() => window.world.editor.setActive(false));
 
 // and without a pack, the world is what it was: the rule plants everywhere and nothing stands
 const bare = await ctx.newPage();

@@ -181,6 +181,8 @@ export class Vegetation {
   private centre = new THREE.Vector2(NaN, NaN);
   private meshes: THREE.InstancedMesh[] = [];
   private records: THREE.InstancedMesh[] = [];
+  /** for each record mesh, the index into the list it was built from, per instance — the editor picks by this */
+  recordIndex = new Map<THREE.InstancedMesh, number[]>();
 
   constructor(private frame: Frame, private field: HeightField) {
     this.group.name = 'vegetation';
@@ -306,10 +308,12 @@ export class Vegetation {
   buildRecords(list: TreeRecord[]) {
     for (const m of this.records) { this.group.remove(m); (m.material as THREE.Material).dispose(); m.dispose(); }
     this.records = [];
+    this.recordIndex.clear();
     this.counts.record_oak = 0; this.counts.record_shrub = 0;
     const OAK_H = 4.9, OAK_R = 2.35, SHRUB_H = 1.03, SHRUB_R = 0.8;
     const groups: Record<'oak' | 'shrub', TreeRecord[]> = { oak: [], shrub: [] };
-    for (const t of list) (t.height >= 4.5 ? groups.oak : groups.shrub).push(t);
+    const indices: Record<'oak' | 'shrub', number[]> = { oak: [], shrub: [] };
+    list.forEach((t, i) => { const k = t.height >= 4.5 ? 'oak' : 'shrub'; groups[k].push(t); indices[k].push(i); });
     const q = new THREE.Quaternion(), e = new THREE.Euler(), v = new THREE.Vector3(), s = new THREE.Vector3();
     for (const name of ['oak', 'shrub'] as const) {
       const rows = groups[name];
@@ -340,9 +344,13 @@ export class Vegetation {
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
       mesh.frustumCulled = false;
       this.records.push(mesh);
+      this.recordIndex.set(mesh, indices[name]);
       this.group.add(mesh);
     }
   }
+
+  /** the record meshes, for picking */
+  get recordMeshes(): THREE.InstancedMesh[] { return this.records; }
 
   /** replant once the player has walked well into the outer part of the patch */
   update(x: number, z: number, o: VegetationOpts) {
