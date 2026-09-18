@@ -134,3 +134,87 @@ export function tilePng(z, x, y) {
   }
   return png(SIZE, SIZE, rgb);
 }
+
+// ---- a data pack for the same hillside ------------------------------------------------------------
+// The pack is the property's record: the surveyed line, what stands, every tree, the road, the
+// placed zones. Like the terrain it is generated, not committed, and every position below is
+// metres east and north of the origin so the assertions can be worked out by hand.
+
+/** metres east/north of the origin -> lng/lat */
+export const at = (e, n) => [ORIGIN.lng + e / MX, ORIGIN.lat + n / MY];
+const box = (e0, n0, e1, n1) => [at(e0, n0), at(e1, n0), at(e1, n1), at(e0, n1), at(e0, n0)];
+
+/** forty trees in the east of the area, in five rows, none of them on a footprint or the spawn */
+export const PACK_TREES = [];
+for (const e of [50, 60, 70, 80, 90]) {
+  for (const n of [-80, -60, -40, -20, 0, 20, 40, 60]) {
+    const height = 4 + ((e / 10 + n / 20 + 12) % 9) * 2;      // 4..20 m, deterministic
+    PACK_TREES.push({ e, n, height, crown: 1.5 + (height % 5) });
+  }
+}
+
+export const PACK_FRAME = { origin_lng: ORIGIN.lng - 150 / MX, origin_lat: ORIGIN.lat - 150 / MY, metres_per_deg_lng: MX, metres_per_deg_lat: MY };
+export const PACK_AOI = [at(-100, -100)[0], at(-100, -100)[1], at(100, 100)[0], at(100, 100)[1]];
+export const PACK_HOUSE = { e0: 35, n0: 26, e1: 45, n1: 34, roof: 3.6 };
+export const PACK_GARAGE = { e0: -46, n0: 25, e1: -34, n1: 35, roof: 4.0 };
+export const PACK_PAD = { e0: 37, n0: 42, e1: 43, n1: 48 };
+
+export function packFiles(base) {
+  const f = PACK_FRAME;
+  const rows = PACK_TREES.map(t => {
+    const x = Math.round((t.e + 150) * 10), y = Math.round((t.n + 150) * 10);
+    return `${x},${y},${Math.round(t.height * 10)},${Math.round(t.crown * 10)},${Math.round(height(...at(t.e, t.n)) * 10)}`;
+  });
+  const fc = features => ({ type: 'FeatureCollection', features });
+  const poly = (props, ring) => ({ type: 'Feature', properties: props, geometry: { type: 'Polygon', coordinates: [ring] } });
+  const line = (props, pts) => ({ type: 'Feature', properties: props, geometry: { type: 'LineString', coordinates: pts } });
+  const point = (props, p) => ({ type: 'Feature', properties: props, geometry: { type: 'Point', coordinates: p } });
+  return {
+    'pack.json': {
+      schema: 1, id: 'fixture-pack', name: 'Fixture Hill', frame: f,
+      aoi: { bbox: PACK_AOI }, spawn: { lng: ORIGIN.lng, lat: ORIGIN.lat, heading: 0 },
+      layers: {
+        survey: { file: 'survey.geojson', authority: 'survey', date: '2024-11-14' },
+        county: { file: 'county.geojson', authority: 'county' },
+        roofs: { file: 'roofs.geojson', authority: 'derived', captured: '2018' },
+        trees: { file: 'trees.csv', authority: 'derived', captured: '2018', columns: ['x_east_dm', 'y_north_dm', 'height_dm', 'crown_radius_dm', 'ground_dm'] },
+        vision: { file: 'vision.geojson', authority: 'proposal' },
+        imagery: { kind: 'xyz', template: `${base}/aerial/{z}/{y}/{x}`, maxzoom: 18, captured: '2025' }
+      }
+    },
+    'trees.csv': 'x_east_dm,y_north_dm,height_dm,crown_radius_dm,ground_dm\n' + rows.join('\n') + '\n',
+    'survey.geojson': fc([
+      poly({ layer: 'boundary', authority: 'survey' }, box(-80, -80, 80, 80)),
+      poly({ layer: 'easement', authority: 'survey' }, box(-80, -80, -76, 80)),
+      point({ layer: 'monument', authority: 'survey', label: 'fixture pipe' }, at(80, 80))
+    ]),
+    'county.geojson': fc([
+      poly({ layer: 'parcel', authority: 'county' }, box(-90, -90, 90, 90)),
+      poly({ layer: 'footprint', authority: 'county', lidar_2018: { kind: 'house', roof_m: 3.6, roof_p50_m: PACK_HOUSE.roof } }, box(PACK_HOUSE.e0, PACK_HOUSE.n0, PACK_HOUSE.e1, PACK_HOUSE.n1)),
+      poly({ layer: 'footprint', authority: 'county', lidar_2018: { kind: 'concrete pad', roof_m: null } }, box(PACK_PAD.e0, PACK_PAD.n0, PACK_PAD.e1, PACK_PAD.n1)),
+      line({ layer: 'road', authority: 'county', name: 'FIXTURE RD' }, [at(-90, -20), at(0, -20), at(90, -20)])
+    ]),
+    'roofs.geojson': fc([
+      poly({ layer: 'roof', authority: 'derived', kind: 'warehouse', roof_m: PACK_GARAGE.roof, county_footprint: null }, box(PACK_GARAGE.e0, PACK_GARAGE.n0, PACK_GARAGE.e1, PACK_GARAGE.n1))
+    ]),
+    'vision.geojson': fc([
+      point({ id: 'the-barn', name: 'The Barn', mode: 'both', placeholder: true }, at(-60, -40)),
+      point({ id: 'retreat', name: 'Retreat Village', mode: 'vision', placeholder: true }, at(60, -40)),
+      point({ id: 'hub', name: 'Community Hub', mode: 'vision', placeholder: true }, at(0, 70))
+    ])
+  };
+}
+
+/** an aerial tile: one flat colour with a darker rim, so a draped ring is visibly a photograph and not the slope shading */
+export function aerialPng(z, x, y) {
+  const rgb = Buffer.alloc(SIZE * SIZE * 3);
+  const shade = 96 + ((x * 7 + y * 13) % 5) * 8;
+  for (let j = 0; j < SIZE; j++) {
+    for (let i = 0; i < SIZE; i++) {
+      const k = (j * SIZE + i) * 3;
+      const rim = i < 2 || j < 2 || i >= SIZE - 2 || j >= SIZE - 2;
+      rgb[k] = rim ? 40 : shade; rgb[k + 1] = rim ? 40 : shade + 24; rgb[k + 2] = rim ? 40 : 70;
+    }
+  }
+  return png(SIZE, SIZE, rgb);
+}

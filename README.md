@@ -4,20 +4,24 @@ The open world a member walks into. One world per community; Sulphur Mountain is
 
 This is not a map. The [Ojai Atlas](https://github.com/SacredRebel/EcoVillage-map) is the map — the
 strategy layer, where parcels, the county record, the planning and the siting live. This is the
-place itself: real ground at a metre, the buildings that are proposed for it, the sun where it
-actually is, and a body to walk it with.
+place itself: real ground at a metre, what stands on it and what is proposed for it, every tree
+the lidar saw, the sun where it actually is, and a body to walk it with.
 
 **Live data, one source of truth.** Nothing here has its own opinion about where anything is. The
-ground comes from the atlas's baked USGS 3DEP tiles, the buildings from its `data/structures.json`,
-the models from its `public/models`. Move a building in the atlas's placement studio and it moves
-here. The atlas serves those three things with permissive CORS precisely so this can be a separate
-app on a separate host.
+ground comes from the atlas's baked USGS 3DEP tiles and what is *proposed* from its
+`data/structures.json`; what is *there* comes from the property's own **data pack** — one small
+repository per property, loaded by URL, holding the surveyed boundary, the roofs the lidar
+measured, every tree it saw, the road and the placed zones. Move a building in the atlas and it
+moves here; correct a tree in the pack and it is corrected here. One engine, one pack per property,
+like one game and many maps.
 
 ```
-    playground-cosmos-view          EcoVillage-map              spatial-map
-    identity · wallet · globe  →    the strategy layer     →    the world you walk
-    "enter portal"                  parcels · data · siting     ground · buildings · sun
+    playground-cosmos-view      EcoVillage-map            <property>-world          spatial-map
+    identity · wallet · globe → the strategy layer    +   the property's record  →  the world you walk
+    "enter portal"              parcels · siting          survey · lidar · zones     ground · trees · buildings · sun
 ```
+
+The first pack is [sulphur-mountain-world](https://github.com/SacredRebel/sulphur-mountain-world).
 
 ## Run it
 
@@ -41,6 +45,11 @@ By default it reads the live atlas. Point it somewhere else with `?atlas=`:
 | `community` | which world: `sulphur-mountain`, `howard`, `keris-property`, `chers-property` |
 | `at` | `lng,lat,heading` — where to stand, and which way to face |
 | `atlas` | the origin to read the ground and the structures from |
+| `pack` | the data pack's URL (a folder, or its `pack.json`); `0` for none. Sulphur Mountain has a default |
+| `t` | the hour to start at, community wall time — `?t=8` is a winter morning's light |
+| `avatar` | a `.vrm` or `.glb` to walk in; anything that fails to load leaves you in the built-in body |
+| `stick` | `1` shows the thumbstick on a desktop |
+| `plants` | 0–2, multiplies the vegetation rule's density; the record's trees are never scaled |
 
 ## Controls
 
@@ -61,8 +70,32 @@ cannot disagree, and there are no seams between tiles.
 
 **`world/terrain.ts`** — two rings. A fine one you are standing in (640 m across, a vertex every
 2.5 m) that is rebuilt as you leave it, and a coarse one out to the horizon built once. Vertex
-colours come from slope and height rather than a texture, so the first frame costs one fetch of
-elevation and nothing else.
+colours come from slope and height, so the first frame costs one fetch of elevation and nothing
+else. When a pack names an aerial, the fine ring is draped with it: the tiles over the ring go into
+one canvas, every vertex gets the UV of its own longitude and latitude, and the texture updates tile
+by tile as they land. If no tile lands the ring keeps its slope colours.
+
+**`world/pack.ts`** and **`world/today.ts`** — the property's record, and what it puts on the
+ground. `pack.json` names the layers; nothing in a pack is required and a missing file is an empty
+layer, never an error. `today` raises the county's footprints to the heights the lidar measured
+over them (and lays a "footprint" the lidar says is concrete flat), stands the roofs the county
+does not map, draws the surveyed line and the found monuments, the easement, the county ring faintly
+beside it so the drift is visible, the road as a strip on the ground, and a post with a label at
+every placed zone — gold where something already stands, violet where it is planned.
+
+**`world/vegetation.ts`** — a rule and a record. The rule is the Ojai rule: coast live oak on the
+gentler, cooler, north-facing ground, chamise and ceanothus on the steep dry south faces, seeded by
+position so nothing moves between visits. Where a pack has the lidar's trees, each is placed at its
+own position with its own height and crown, and the rule stays out of that ground. Everything is
+instanced: a wooded hillside costs about what an empty one does.
+
+**`world/collide.ts`** — walls. Buildings are prisms over their footprint; a body that is inside one
+with its head below the roof is pushed to the nearest edge. Reserved ground is deliberately not solid:
+you are meant to stand in the footprint of a house that does not exist yet.
+
+**`player/avatar.ts`** — the body. A built-in capsule at human proportions that always works, and a
+loaded VRM or glTF when one is given. The walk cycle lives outside both and is paced by distance
+covered, not by the clock, so the feet stay planted when the speed changes.
 
 **`world/sun.ts`** — the NOAA solar position algorithm, and the instant that is a given wall-clock
 time *at the community* rather than wherever the viewer happens to be. Getting that wrong would move
@@ -86,18 +119,23 @@ against whatever the renderer produced: the height under the player, the relief 
 the distance a second of walking covers, where the camera sits, where the sun is. The tiles are
 generated on the spot by `tests/fixture.mjs` — no binaries in the repo, nothing to regenerate.
 
+## Looking at a pack
+
+`PACK_DIR=../sulphur-mountain-world node tests/serve.mjs` serves a pack from disk at
+`/realpack/`, and `node scripts/shot.mjs "<url>" out.png [lng,lat,heading]` boots the built world
+against it headless and writes a screenshot.
+
 ## What is next
 
-- **Avatars.** VRM (`@pixiv/three-vrm`), so a Playground avatar drops in without conversion. The
-  placeholder body is deliberately crude and deliberately the right size.
-- **Vegetation.** Oaks and chaparral scattered by rule — slope, aspect, and the canopy visible in
-  NAIP — then GPU-instanced. Ten thousand trees should cost about what ten cost.
-- **A photographic ground.** NAIP orthophoto baked per property, blended over the slope shading.
-  Public domain, unlike map-service imagery.
-- **Real collision.** three-mesh-bvh against the buildings, and a proper character controller
-  (pmndrs `BVHEcctrl`) once there is something to bump into.
-- **Presence.** Seeing each other: position, heading and animation state at about 10 Hz. The shape
-  is being designed now and wired later, ahead of the move to Rust and Holochain.
+- **The ground close up.** The aerial reads well from ten metres out; under your feet it wants a
+  tiled CC0 material (dry grass, chaparral soil) blended in near the camera, bark on the trunks,
+  shingle on the roofs.
+- **The house.** The new build as a `.glb`, sited from the surveyed line and never from the county
+  ring, in the atlas's registry so it appears here the moment it is placed there.
+- **Reconciliation.** The lidar is 2018. A way to stand at a tree and say *this one is gone*, and
+  have the pack remember.
+- **Real collision.** three-mesh-bvh against the models once there are models.
+- **Presence.** Seeing each other: position, heading and animation state at about 10 Hz.
 
 ## Licence
 

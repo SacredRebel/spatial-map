@@ -7,7 +7,7 @@
 import { chromium } from 'playwright';
 import { existsSync } from 'fs';
 import { start } from './serve.mjs';
-import { height, ORIGIN } from './fixture.mjs';
+import { height, ORIGIN, PACK_TREES, PACK_HOUSE, PACK_GARAGE, PACK_AOI } from './fixture.mjs';
 
 const PORT = 5181;
 const BASE = `http://localhost:${PORT}`;
@@ -36,7 +36,7 @@ const errs = [];
 page.on('pageerror', e => errs.push('PAGE ' + e.message));
 page.on('console', m => { if (m.type() === 'error') errs.push('CONSOLE ' + m.text().slice(0, 200)); });
 
-await page.goto(`${BASE}/?atlas=${BASE}&community=sulphur-mountain`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+await page.goto(`${BASE}/?atlas=${BASE}&community=sulphur-mountain&pack=${BASE}/pack/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
 await page.waitForFunction(() => window.world && window.world.ready, { timeout: 45000 });
 await page.waitForTimeout(400);
 
@@ -245,14 +245,15 @@ const wall = await page.evaluate(() => {
   for (let i = 0; i < 10; i++) p.update(1);
   p.key('w', false);
   const s = p.state();
-  return { lat: s.lat, lng: s.lng, touching: s.touching, solids: p.solids.length };
+  return { lat: s.lat, lng: s.lng, touching: s.touching, solids: p.solids.map(x => x.id).sort() };
 });
 // the block's south edge is at 34.43300; a body with a shoulder of 0.34 m stops just short of it
 check('walls: the massing block stops the walker instead of letting them through it',
   wall.lat < 34.43300 && wall.lat > 34.43290 && wall.touching === 'fixture-massing',
   { lat: +wall.lat.toFixed(6), stoppedShortM: +((34.43300 - wall.lat) * MY).toFixed(2), touching: wall.touching });
-check('walls: only what is built is solid — reserved ground is still walkable', wall.solids === 1,
-  { solids: wall.solids });
+// the reserved site and the concrete pad are ground; the massing block and what the pack says stands are walls
+check('walls: only what is built is solid — reserved ground and the concrete pad are still walkable',
+  wall.solids.join() === 'fixture-massing,house,warehouse', { solids: wall.solids });
 
 // ---- the walk cycle --------------------------------------------------------------------------
 // One stride is 1.55 m (STRIDE in player/avatar.ts). The gait is paced by ground covered, so after
@@ -308,6 +309,150 @@ check('thumbstick: a full stick walks 1.6 m and half a stick walks half of it, t
 const fallback = await page.evaluate(() => window.world.setAvatar('/no-such-avatar.vrm'));
 check('avatar: a file that will not load falls back to the built-in body rather than emptying the world',
   fallback === 'capsule', { kind: fallback });
+
+
+// ---- the pack --------------------------------------------------------------------------------
+// A property's record, loaded by URL. Where it speaks the world stops guessing: the lidar's trees
+// stand where the record puts them and the rule keeps out of that ground; what stands is raised
+// to its measured height and stops you; the surveyed line is on the ground; the aerial is on it.
+const pk = await page.evaluate(() => {
+  const w = window.world;
+  return { id: w.pack?.manifest?.id, trees: w.pack?.trees?.length, counts: w.vegetation.counts, today: w.today.counts };
+});
+check('pack: the manifest and every layer load from the pack url', pk.id === 'fixture-pack' && pk.trees === PACK_TREES.length, pk);
+
+// read the record instances back: position and height from each instance matrix
+const records = await page.evaluate(() => {
+  const w = window.world;
+  const list = [];
+  for (const name of ['veg-record-oak', 'veg-record-shrub']) {
+    const m = w.vegetation.group.getObjectByName(name);
+    if (!m) continue;
+    const e = m.instanceMatrix.array;
+    for (let i = 0; i < m.count; i++) {
+      const o = i * 16;
+      const sy = Math.hypot(e[o + 4], e[o + 5], e[o + 6]);          // the y column's length is the y scale
+      const ll = w.frame.toLngLat(e[o + 12], e[o + 14]);
+      list.push({ lng: ll.lng, lat: ll.lat, y: e[o + 13], height: sy * (name.endsWith('oak') ? 4.9 : 1.03) });
+    }
+  }
+  return list;
+});
+{
+  const want = PACK_TREES.map(t => ({ lng: ORIGIN.lng + t.e / MX, lat: ORIGIN.lat + t.n / MY, height: t.height }));
+  let worstPos = 0, worstH = 0, worstGround = 0;
+  for (const t of want) {
+    const near = records.map(r => ({ r, d: Math.hypot((r.lng - t.lng) * MX, (r.lat - t.lat) * MY) })).sort((a, b) => a.d - b.d)[0];
+    worstPos = Math.max(worstPos, near.d);
+    worstH = Math.max(worstH, Math.abs(near.r.height - t.height));
+    worstGround = Math.max(worstGround, Math.abs(near.r.y - truth(t.lng, t.lat)));
+  }
+  check('pack: every recorded tree stands where the record puts it, at its recorded height, on the ground',
+    records.length === PACK_TREES.length && worstPos < 0.05 && worstH < 0.05 && worstGround < 0.05,
+    { planted: records.length, worstPositionM: +worstPos.toFixed(3), worstHeightM: +worstH.toFixed(3), worstGroundM: +worstGround.toFixed(3) });
+}
+const inside = await page.evaluate((aoi) => {
+  const w = window.world;
+  let n = 0;
+  for (const name of ['veg-oak', 'veg-shrub']) {
+    const m = w.vegetation.group.getObjectByName(name);
+    if (!m) continue;
+    const e = m.instanceMatrix.array;
+    for (let i = 0; i < m.count; i++) {
+      const ll = w.frame.toLngLat(e[i * 16 + 12], e[i * 16 + 14]);
+      if (ll.lng > aoi[0] && ll.lng < aoi[2] && ll.lat > aoi[1] && ll.lat < aoi[3]) n++;
+    }
+  }
+  return n;
+}, PACK_AOI);
+check("pack: the rule plants nothing inside the pack's ground — the record is the only tree there", inside === 0, { ruleTreesInsideAoi: inside });
+
+const stands = await page.evaluate(() => {
+  const w = window.world, g = w.today.group;
+  const names = g.children.map(c => c.name).sort();
+  const house = g.getObjectByName('today:house'), garage = g.getObjectByName('today:warehouse');
+  return {
+    names, houseY: house?.position.y ?? null, garageY: garage?.position.y ?? null,
+    hasPad: !!g.getObjectByName('pad:concrete-pad'), raisedPad: !!g.getObjectByName('today:concrete-pad'),
+    solids: w.player.solids.map(s => s.id).sort()
+  };
+});
+{
+  const corners = (b) => [[b.e0, b.n0], [b.e1, b.n0], [b.e1, b.n1], [b.e0, b.n1]].map(([e, n]) => truth(ORIGIN.lng + e / MX, ORIGIN.lat + n / MY));
+  const houseTop = Math.min(...corners(PACK_HOUSE)) + PACK_HOUSE.roof;
+  const garageTop = Math.min(...corners(PACK_GARAGE)) + PACK_GARAGE.roof;
+  check('pack: the house and the unmapped warehouse are raised to their lidar heights, the concrete pad is laid flat',
+    stands.houseY != null && Math.abs(stands.houseY - houseTop) < 0.05 && stands.garageY != null && Math.abs(stands.garageY - garageTop) < 0.05 && stands.hasPad && !stands.raisedPad,
+    { houseTop: stands.houseY == null ? null : +stands.houseY.toFixed(2), want: +houseTop.toFixed(2), garageTop: stands.garageY == null ? null : +stands.garageY.toFixed(2), wantGarage: +garageTop.toFixed(2), pad: stands.hasPad, raisedPad: stands.raisedPad });
+  check('pack: what stands is solid — the house, the warehouse, and nothing for the pad',
+    stands.solids.includes('house') && stands.solids.includes('warehouse') && !stands.solids.includes('concrete-pad'), stands.solids);
+}
+const bump = await page.evaluate(([lng, lat]) => {
+  const w = window.world, p = w.player;
+  // six metres south of the house's south wall, facing north, walking into it for ten seconds
+  w.goto(lng, lat, 0);
+  p.key('w', true);
+  for (let i = 0; i < 10; i++) p.update(1);
+  p.key('w', false);
+  const s = p.state();
+  return { lat: s.lat, touching: s.touching };
+}, [ORIGIN.lng + ((PACK_HOUSE.e0 + PACK_HOUSE.e1) / 2) / MX, ORIGIN.lat + (PACK_HOUSE.n0 - 6) / MY]);
+{
+  const wall = ORIGIN.lat + PACK_HOUSE.n0 / MY;
+  check('pack: the house stops the walker at its wall', bump.touching === 'house' && bump.lat < wall && (wall - bump.lat) * MY < 0.6,
+    { touching: bump.touching, stoppedShortM: +((wall - bump.lat) * MY).toFixed(2) });
+}
+
+const lines = await page.evaluate(() => {
+  const g = window.world.today.group;
+  const n = (name) => { const o = g.getObjectByName(name); return o ? o.geometry.getAttribute('position').count : 0; };
+  return { boundary: n('survey:boundary'), easement: n('survey:easement'), county: n('county:parcel'), road: n('road:fixture-rd'), monument: !!g.getObjectByName('monument:0'),
+    zones: g.children.filter(c => c.name.startsWith('vision:')).map(c => ({ name: c.name, sprite: c.children.some(k => k.isSprite), gold: c.children.some(k => k.isMesh && k.material.color.getHexString() === 'e0b64a') })) };
+});
+// the boundary is a 320 m square sampled every 2 m; the road 180 m every 3 m, two vertices a sample
+check('pack: the surveyed line, the easement, the county ring and the road are laid on the ground, and the pipe is a post',
+  lines.boundary >= 160 && lines.easement >= 80 && lines.county >= 160 && lines.road >= 120 && lines.monument, lines);
+check('pack: each placed zone is a post with a label — gold where something already stands, violet where it is planned',
+  lines.zones.length === 3 && lines.zones.every(z => z.sprite) && lines.zones.filter(z => z.gold).length === 1 && lines.zones.find(z => z.gold).name === 'vision:the-barn',
+  lines.zones);
+
+await page.evaluate(() => window.world.terrain.imageryReady);
+const drape = await page.evaluate(() => {
+  const w = window.world, m = w.terrain.group.getObjectByName('terrain-fine');
+  return { ...w.terrain.imageryState, hasMap: !!m.material.map, isCanvas: !!(m.material.map && m.material.map.isCanvasTexture), vertexColours: m.material.vertexColors, uv: !!m.geometry.getAttribute('uv') };
+});
+check('pack: the aerial is draped over the fine ring — every tile drawn, the slope colours retired, a uv for every vertex',
+  drape.active && drape.tiles > 0 && drape.loaded === drape.tiles && drape.failed === 0 && drape.hasMap && drape.isCanvas && drape.vertexColours === false && drape.uv, drape);
+
+const hudPack = await page.evaluate(() => { const el = document.querySelector('[data-el="pack"]'); return { hidden: el.hidden, text: el.textContent }; });
+check('pack: the HUD says what the pack brought', !hudPack.hidden && /Fixture Hill/.test(hudPack.text) && /40 trees/.test(hudPack.text), hudPack);
+
+// and without a pack, the world is what it was: the rule plants everywhere and nothing stands
+const bare = await ctx.newPage();
+await bare.goto(`${BASE}/?atlas=${BASE}&community=sulphur-mountain&pack=0`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+await bare.waitForFunction(() => window.world && window.world.ready, { timeout: 45000 });
+const plain = await bare.evaluate((aoi) => {
+  const w = window.world;
+  let n = 0;
+  const m = w.vegetation.group.getObjectByName('veg-oak');
+  const e = m.instanceMatrix.array;
+  for (let i = 0; i < m.count; i++) {
+    const ll = w.frame.toLngLat(e[i * 16 + 12], e[i * 16 + 14]);
+    if (ll.lng > aoi[0] && ll.lng < aoi[2] && ll.lat > aoi[1] && ll.lat < aoi[3]) n++;
+  }
+  return { pack: w.pack, ruleOaksInsideAoi: n, today: w.today.group.children.length, map: !!w.terrain.group.getObjectByName('terrain-fine').material.map };
+}, PACK_AOI);
+check('no pack: the rule plants the same ground, nothing stands, the slope colours stay', plain.pack === null && plain.ruleOaksInsideAoi > 10 && plain.today === 0 && !plain.map, plain);
+// an aerial that never arrives must not leave the ground a flat placeholder colour
+const gone = await bare.evaluate(async (base) => {
+  const w = window.world;
+  w.terrain.setImagery({ template: `${base}/nowhere/{z}/{x}/{y}`, maxzoom: 18 });
+  await w.terrain.imageryReady;
+  const m = w.terrain.group.getObjectByName('terrain-fine').material;
+  return { ...w.terrain.imageryState, map: !!m.map, vertexColours: m.vertexColors };
+}, BASE);
+check('no aerial: when every tile fails the ring goes back to its slope colours', gone.tiles > 0 && gone.failed === gone.tiles && !gone.active && !gone.map && gone.vertexColours === true, gone);
+await bare.close();
 
 // ---- the sun ----------------------------------------------------------------------------------
 const sun = await page.evaluate(() => {

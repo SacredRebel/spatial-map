@@ -9,7 +9,7 @@ import { createServer } from 'http';
 import { readFile, stat } from 'fs/promises';
 import { join, dirname, extname } from 'path';
 import { fileURLToPath } from 'url';
-import { index, tilePng, Z } from './fixture.mjs';
+import { index, tilePng, Z, packFiles, aerialPng } from './fixture.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -66,6 +66,29 @@ export function start(port = PORT) {
       }
       if (p.startsWith('/api/structures')) {
         return send(res, 200, JSON.stringify(STRUCTURES), TYPES['.json']);
+      }
+      // the fixture data pack, and the aerial it names
+      const pk = /^\/pack\/([a-z.]+)$/.exec(p);
+      if (pk) {
+        const files = packFiles(`http://localhost:${port}`);
+        const body = files[pk[1]];
+        if (body == null) return send(res, 404, 'no such file in the pack');
+        return typeof body === 'string'
+          ? send(res, 200, body, 'text/csv; charset=utf-8')
+          : send(res, 200, JSON.stringify(body), TYPES['.json']);
+      }
+      // a real pack from disk, for looking at one: PACK_DIR=../sulphur-mountain-world node tests/serve.mjs
+      if (process.env.PACK_DIR && p.startsWith('/realpack/')) {
+        const file = join(process.env.PACK_DIR, p.slice('/realpack/'.length));
+        const info = await stat(file).catch(() => null);
+        if (!info || !info.isFile()) return send(res, 404, 'not in the pack');
+        const type = file.endsWith('.csv') ? 'text/csv; charset=utf-8' : TYPES[extname(file)] || 'application/octet-stream';
+        return send(res, 200, await readFile(file), type);
+      }
+      const air = /^\/aerial\/(\d+)\/(\d+)\/(\d+)$/.exec(p);
+      if (air) {
+        const [z, y, x] = air.slice(1).map(Number);
+        return send(res, 200, aerialPng(z, x, y), TYPES['.png']);
       }
       if (p === '/') p = '/index.html';
       const file = join(root, 'dist', p);

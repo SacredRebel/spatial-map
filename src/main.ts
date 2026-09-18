@@ -6,6 +6,13 @@
 //   house go", and it is the one on the map.
 //
 //   URL: ?community=sulphur-mountain&at=<lng>,<lat>,<heading>&t=<hours>&avatar=<url>&atlas=<origin>
+//        &pack=<url of a data pack, or 0 for none>
+//
+//   A community may also have a PACK — one repository of that property's ground truth (the
+//   surveyed line, the roofs the lidar measured, every tree it saw, the road, the placed zones).
+//   Where the pack speaks, the world listens to it instead of guessing: the real trees stand where
+//   the record puts them and the rule keeps out of that ground; what stands is raised to its
+//   measured height; the county's aerial is laid over the ground you walk on.
 
 import * as THREE from 'three';
 import { Frame } from './world/geo';
@@ -16,6 +23,8 @@ import { Sky } from './world/sky';
 import { instantAt } from './world/sun';
 import { Structures } from './world/structures';
 import { solidsFrom } from './world/collide';
+import { loadPack, type PackData } from './world/pack';
+import { Today } from './world/today';
 import { Player } from './player/player';
 import { loadAvatar } from './player/avatar';
 import { Hud } from './ui/hud';
@@ -30,6 +39,11 @@ const COMMUNITIES: Record<string, Community> = {
   'howard': { name: 'Howard', pid: 'howard', lng: -119.319741, lat: 34.424183, heading: 180, tz: TZ },
   'keris-property': { name: "Keri's", pid: 'keris-property', lng: -119.331364, lat: 34.433173, heading: 180, tz: TZ },
   'chers-property': { name: "Cher's", pid: 'chers-property', lng: -119.288871, lat: 34.402005, heading: 180, tz: TZ }
+};
+
+/** the pack each community keeps, unless the URL says otherwise */
+const PACKS: Record<string, string> = {
+  'sulphur-mountain': 'https://raw.githubusercontent.com/SacredRebel/sulphur-mountain-world/main/'
 };
 
 const FINE = { radius: 320, segments: 257 };     // a vertex every 2.5 m out to 320 m
@@ -57,6 +71,8 @@ const num = (key: string, fallback: number, lo: number, hi: number): number => {
 const startHours = num('t', 13.5, 0, 24);   // early afternoon reads the land best
 const avatarUrl = qs.get('avatar');
 const plantDensity = num('plants', 1, 0, 2);
+const packParam = qs.get('pack');
+const packUrl = packParam === '0' || packParam === 'none' ? null : packParam || PACKS[slug] || null;
 
 const app = document.getElementById('app')!;
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -76,9 +92,11 @@ const terrain = new Terrain(frame, field);
 const vegetation = new Vegetation(frame, field);
 const sky = new Sky();
 const structures = new Structures(frame, field, atlas);
+const today = new Today(frame, field);
 const player = new Player(frame, field, camera, renderer.domElement);
+let pack: PackData | null = null;
 
-scene.add(terrain.group, vegetation.group, structures.group, player.object);
+scene.add(terrain.group, vegetation.group, structures.group, today.group, player.object);
 sky.addTo(scene);
 
 // the clock is the community's own wall time, not the viewer's: a shadow at half past two means
@@ -105,6 +123,16 @@ function applySun() {
   hud.setSun(pos.altitude, pos.azimuth);
   scene.fog = new THREE.Fog(horizon.getHex(), 420, 4200);
   renderer.setClearColor(horizon.getHex());
+}
+
+/** the ring of the pack's area, in world metres — the rule stays out of it, the record fills it */
+function packRing(): { x: number; z: number }[] {
+  if (!pack) return [];
+  const [w, s, e, n] = pack.manifest.aoi.bbox;
+  return [[w, s], [e, s], [e, n], [w, n]].map(([lng, lat]) => {
+    const p = frame.toWorld(lng, lat);
+    return { x: p.x, z: p.z };
+  });
 }
 
 /** what the plants must leave clear: every footprint the atlas knows about, plus where you stand */
@@ -153,12 +181,29 @@ async function boot() {
   applySun();
 
   hud.setLoading('reading what is proposed here…');
-  await structures.load(area.pid);
+  const [, loaded] = await Promise.all([
+    structures.load(area.pid),
+    packUrl ? loadPack(packUrl) : Promise.resolve(null)
+  ]);
+  pack = loaded;
   structures.build(area.pid);
   player.solids = solidsFrom(structures.list, frame, field, area.pid);
 
+  if (pack) {
+    hud.setLoading('reading what stands here…');
+    today.build(pack);
+    player.solids = player.solids.concat(today.solids);
+    // the record's trees, at their own positions; the rule keeps out of the pack's ground
+    vegetation.buildRecords(pack.trees.map(t => {
+      const w = frame.toWorld(t.lng, t.lat);
+      return { x: w.x, z: w.z, height: t.height, crown: t.crown };
+    }));
+    if (pack.imagery) terrain.setImagery({ template: pack.imagery.template, maxzoom: pack.imagery.maxzoom });
+    hud.setPack(packLine(pack));
+  }
+
   hud.setLoading('planting…');
-  vegetation.build(p.x, p.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity });
+  vegetation.build(p.x, p.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity, exclude: packRing() });
 
   hud.setLoading(null);
   ready = true;
@@ -185,7 +230,7 @@ function loop() {
     player.update(dt);
     const p = player.position;
     terrain.update(p.x, p.z, FINE);
-    vegetation.update(p.x, p.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity });
+    vegetation.update(p.x, p.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity, exclude: packRing() });
     sky.mesh.position.copy(camera.position);
     sky.sun.target.position.set(p.x, p.y, p.z);
     sky.sun.position.copy(sky.sun.target.position).add(sunOffset());
@@ -206,17 +251,29 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
+/** one line for the HUD: what the pack brought, and how old each part is */
+function packLine(p: PackData): string {
+  const L = p.manifest.layers;
+  const bits: string[] = [];
+  if (L.survey) bits.push(`survey ${String(L.survey.date ?? '')}`.trim());
+  if (p.trees.length) bits.push(`${p.trees.length.toLocaleString()} trees (${String(L.trees?.captured ?? 'lidar')})`);
+  if (today.counts.buildings) bits.push(`${today.counts.buildings} standing`);
+  if (p.imagery) bits.push(`aerial ${p.imagery.captured ?? ''}`.trim());
+  return `${p.manifest.name} · ${bits.join(' · ')}`;
+}
+
 // a small surface for tests and for the Playground shell to drive
 const api = {
-  player, frame, field, terrain, vegetation, structures, sky, scene, camera, renderer, stick,
+  player, frame, field, terrain, vegetation, structures, today, sky, scene, camera, renderer, stick,
   get ready() { return ready; },
+  get pack() { return pack; },
   state: () => ({ ...player.state(), tiles: field.loadedTiles, community: slug, atlas }),
   goto: (lng: number, lat: number, heading = 0) => player.placeAt(lng, lat, heading),
   setTime: (h: number) => { clockHours = h; applySun(); },
   /** replant around where the player is standing, honouring the real keep-outs */
   replant: () => {
     const p = player.position;
-    vegetation.build(p.x, p.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity });
+    vegetation.build(p.x, p.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity, exclude: packRing() });
     return vegetation.counts;
   },
   setAvatar: async (url: string | null) => {
