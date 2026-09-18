@@ -9,10 +9,18 @@
 //   `massing` is a block at the right footprint and height, to judge bulk. A `model` is the real
 //   thing — a .glb, loaded only when there is one to load, so a world with no buildings never pays
 //   for the loader.
+//
+//   A model you can go into says so: `enter` means the .glb carries its own floors and walls, as
+//   plan rings in its `extras.walk`, and the world walks those instead of treating the outline as
+//   one solid block. And a proposal that stands where something stands today says that too:
+//   `clears` names the standing things (the today layer's kinds) that come down when it goes up,
+//   so the two are never drawn through each other.
 
 import * as THREE from 'three';
 import type { Frame } from './geo';
 import type { HeightField } from './heightfield';
+import type { Solid } from './collide';
+import type { Platform } from './build';
 
 export interface Structure {
   id: string; pid: string; mode: 'vision' | 'current' | 'both';
@@ -25,6 +33,16 @@ export interface Structure {
   altitudeM?: number | null;
   rotationDeg?: number;
   scale?: number;
+  /** the model carries its own floors and walls (extras.walk) — go in, do not bounce off the outline */
+  enter?: boolean;
+  /** what stands here today and comes down for this: kinds from the today layer (`house`, `shed`…) */
+  clears?: string[];
+}
+
+/** what a model's extras.walk holds: plan rings in model metres, heights in model metres */
+interface Walk {
+  floors?: { name?: string; ring: [number, number][]; top: number }[];
+  solids?: { name?: string; ring: [number, number][]; base: number; top: number }[];
 }
 
 /** a structure as a proposal carries it: a full row, or an id to take off the map */
@@ -35,6 +53,11 @@ const FT = 0.3048;
 export class Structures {
   group = new THREE.Group();
   list: Structure[] = [];
+  /** floors and walls the loaded models brought with them, in world metres */
+  platforms: Platform[] = [];
+  solids: Solid[] = [];
+  /** called when a model's floors and walls have arrived, so the walker can be told */
+  onWalk: (() => void) | null = null;
 
   constructor(private frame: Frame, private field: HeightField, private origin: string) {
     this.group.name = 'structures';
@@ -61,8 +84,31 @@ export class Structures {
     }
   }
 
+  /** the standing things every model here clears: what today's layer must not draw */
+  cleared(pid?: string): Set<string> {
+    const out = new Set<string>();
+    for (const s of this.list) {
+      if (pid && s.pid !== pid) continue;
+      if (s.status !== 'model' || !Array.isArray(s.clears)) continue;
+      for (const k of s.clears) out.add(String(k));
+    }
+    return out;
+  }
+
+  /** the ground the models occupy, as world rings: a recorded tree inside one is not drawn */
+  occupied(pid?: string): { x: number; z: number }[][] {
+    const out: { x: number; z: number }[][] = [];
+    for (const s of this.list) {
+      if (pid && s.pid !== pid) continue;
+      if (s.status !== 'model' || !s.outline || s.outline.length < 3) continue;
+      out.push(s.outline.map(([lng, lat]) => { const w = this.frame.toWorld(lng, lat); return { x: w.x, z: w.z }; }));
+    }
+    return out;
+  }
+
   /** take everything down and free it, so a build after a change draws only what is now true */
   clear() {
+    this.platforms = []; this.solids = [];
     for (const o of this.group.children.slice()) {
       o.traverse(c => {
         const m = c as THREE.Mesh;
@@ -141,7 +187,32 @@ export class Structures {
       root.traverse(o => { if ((o as THREE.Mesh).isMesh) { o.castShadow = true; o.receiveShadow = true; } });
       root.name = `model:${s.id}`;
       this.group.add(root);
+      if (s.enter) this.walk(s, root);
     } catch (e) { console.info('[world] model ' + s.id, e); }
+  }
+
+  /** read the floors and walls a model carries and set them down where the model stands */
+  private walk(s: Structure, root: THREE.Object3D) {
+    const walk = (root.userData?.walk || root.children[0]?.userData?.walk) as Walk | undefined;
+    if (!walk) return;
+    root.updateMatrixWorld(true);
+    const k = s.scale ?? 1;
+    const place = (ring: [number, number][]) => ring.map(([x, z]) => {
+      const w = root.localToWorld(new THREE.Vector3(x, 0, z));
+      return { x: w.x, z: w.z };
+    });
+    let n = 0;
+    for (const f of walk.floors || []) {
+      if (!Array.isArray(f.ring) || f.ring.length < 3 || !isFinite(f.top)) continue;
+      this.platforms.push({ id: `${s.id}:${f.name || 'floor'}`, ring: place(f.ring), top: root.position.y + f.top * k });
+      n++;
+    }
+    for (const w of walk.solids || []) {
+      if (!Array.isArray(w.ring) || w.ring.length < 3 || !isFinite(w.top)) continue;
+      this.solids.push({ id: `${s.id}:${w.name || 'wall'}`, ring: place(w.ring), base: root.position.y + (w.base ?? 0) * k, top: root.position.y + w.top * k });
+      n++;
+    }
+    if (n) this.onWalk?.();
   }
 }
 
