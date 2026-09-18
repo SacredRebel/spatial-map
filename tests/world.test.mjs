@@ -7,7 +7,7 @@
 import { chromium } from 'playwright';
 import { existsSync } from 'fs';
 import { start } from './serve.mjs';
-import { height, ORIGIN, PACK_TREES, PACK_STANDING, removedByEdits, PACK_HOUSE, PACK_GARAGE, PACK_AOI, at } from './fixture.mjs';
+import { height, ORIGIN, PACK_TREES, PACK_STANDING, removedByEdits, PACK_HOUSE, PACK_GARAGE, PACK_AOI, at, FIXTURE_MODEL } from './fixture.mjs';
 
 const PORT = 5181;
 const BASE = `http://localhost:${PORT}`;
@@ -997,6 +997,57 @@ const gone = await bare.evaluate(async (base) => {
 }, BASE);
 check('no aerial: when every tile fails the ring goes back to its slope colours', gone.tiles > 0 && gone.failed === gone.tiles && !gone.active && !gone.map && gone.vertexColours === true, gone);
 await bare.close();
+
+// ---- a model you can go into ------------------------------------------------------------------------
+// A proposal that has a .glb: it is placed by the registry, it carries its own floor and wall, it
+// says what standing thing it replaces, and the record's tree under it is not drawn through it.
+const entered = await page.evaluate(async ({ pos, outline, fixture }) => {
+  const w = window.world, p = w.player;
+  const before = {
+    house: !!w.today.group.getObjectByName('today:house'),
+    solids: p.solids.map(s => s.id).sort(),
+    platforms: p.platforms.length,
+    records: (() => { let n = 0; for (const name of ['veg-record-oak', 'veg-record-shrub']) { const m = w.vegetation.group.getObjectByName(name); if (m) n += m.count; } return n; })()
+  };
+  w.rebuild([], [{ id: 'fixture-house', pid: 'fixture', mode: 'vision', name: 'a house you can go into', status: 'model',
+    model: '/models/fixture-house.glb', position: pos, altitudeM: 0, rotationDeg: 0, scale: 1, outline, enter: true, clears: ['house'] }]);
+  // the model arrives in the background; wait for its floor
+  for (let i = 0; i < 100 && !w.structures.platforms.length; i++) await new Promise(r => setTimeout(r, 100));
+  const loaded = !!w.structures.group.getObjectByName('model:fixture-house');
+  const after = {
+    house: !!w.today.group.getObjectByName('today:house'),
+    solids: p.solids.map(s => s.id).sort(),
+    platforms: p.platforms.map(f => f.id),
+    records: (() => { let n = 0; for (const name of ['veg-record-oak', 'veg-record-shrub']) { const m = w.vegetation.group.getObjectByName(name); if (m) n += m.count; } return n; })()
+  };
+  // stand on the slab: two metres north of its centre, inside the ring
+  w.goto(pos[0], pos[1] + 2 / 110540, 0);
+  p.update(0.1); p.update(0.1);
+  const onSlab = { ground: p.state().groundM, terrain: w.field.atOr(pos[0], pos[1] + 2 / 110540, NaN), centre: w.field.atOr(pos[0], pos[1], NaN) };
+  // walk north into the wall from eight metres south of the centre
+  w.goto(pos[0], pos[1] - 8 / 110540, 0);
+  p.key('w', true); for (let i = 0; i < 6; i++) p.update(1); p.key('w', false);
+  const st = p.state();
+  const intoWall = { northM: (st.lat - pos[1]) * 110540, touching: st.touching };
+  // take the proposal away again: the house is back, the tree is back
+  w.rebuild([], []);
+  const restored = { house: !!w.today.group.getObjectByName('today:house'), platforms: p.platforms.map(f => f.id), solids: p.solids.map(s => s.id).sort() };
+  return { before, loaded, after, onSlab, intoWall, restored, fixture };
+}, { pos: at(70, 0), outline: [at(66, -3), at(74, -3), at(74, 3), at(66, 3), at(66, -3)], fixture: FIXTURE_MODEL });
+check('model: a proposal with a .glb is placed by the registry and brings its own floor and wall',
+  entered.loaded && entered.after.platforms.includes('fixture-house:slab') && entered.after.solids.includes('fixture-house:wall') && !entered.after.solids.includes('fixture-house'),
+  { loaded: entered.loaded, platforms: entered.after.platforms, solids: entered.after.solids });
+check('model: what it clears is not drawn — the standing house is gone from the world and from the walls',
+  entered.before.house && entered.before.solids.includes('house') && !entered.after.house && !entered.after.solids.includes('house'),
+  { before: entered.before.house, after: entered.after.house, solids: entered.after.solids });
+check('model: the record\'s tree under the proposal is not drawn through it',
+  entered.after.records === entered.before.records - 1, { before: entered.before.records, after: entered.after.records });
+check('model: the walker stands on the slab, a step above the ground, and the wall stops them',
+  Math.abs(entered.onSlab.ground - (entered.onSlab.centre + entered.fixture.slab)) < 0.02 && entered.intoWall.touching === 'fixture-house:wall' && entered.intoWall.northM < -3 && entered.intoWall.northM > -4,
+  { stood: +entered.onSlab.ground.toFixed(2), slabTop: +(entered.onSlab.centre + entered.fixture.slab).toFixed(2), northM: +entered.intoWall.northM.toFixed(2), touching: entered.intoWall.touching });
+check('model: taken away again, the house stands and nothing of the model is left to walk on or into',
+  entered.restored.house && entered.restored.platforms.length === entered.before.platforms && !entered.restored.platforms.some(f => f.startsWith('fixture-house')) && entered.restored.solids.includes('house') && !entered.restored.solids.some(s => s.startsWith('fixture-house')),
+  { house: entered.restored.house, platforms: entered.restored.platforms, before: entered.before.platforms });
 
 // ---- when the fine ground does not answer ------------------------------------------------------------
 // The atlas is down, or unreachable from where the person is: the world must still open. It falls

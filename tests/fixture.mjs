@@ -278,3 +278,57 @@ export function materialsJson(base) {
   }
   return { note: 'fixture materials', materials: m };
 }
+
+// ---- a model you can go into ------------------------------------------------------------------------
+// A small house as a .glb, generated here like everything else: a slab 8 m by 6 m, a wall along its
+// south edge, a roof on four posts, and `extras.walk` saying the slab is a floor and the wall is a
+// wall. The world reads that and lets the walker in.
+export const FIXTURE_MODEL = { w: 8, d: 6, slab: 0.4, wall: 3.0, roof: 3.7 };
+export function fixtureModelGlb() {
+  const { w, d, slab, wall, roof } = FIXTURE_MODEL;
+  const pos = []; const idx = [];
+  const box = (x0, y0, z0, x1, y1, z1) => {
+    const b = pos.length / 3;
+    const c = [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1], [x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]];
+    for (const p of c) pos.push(...p);
+    // six faces, each two triangles, wound outward
+    const f = [[0, 3, 2, 1], [4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]];
+    for (const [a, bq, cq, dq] of f) idx.push(b + a, b + bq, b + cq, b + a, b + cq, b + dq);
+  };
+  box(-w / 2, 0, -d / 2, w / 2, slab, d / 2);                                 // the slab
+  box(-w / 2, slab, d / 2 - 0.2, w / 2, slab + wall, d / 2);                  // the south wall (z = +d/2 is south)
+  box(-w / 2, roof - 0.3, -d / 2, w / 2, roof, d / 2);                        // the roof
+  for (const [x, z] of [[-w / 2 + 0.2, -d / 2 + 0.2], [w / 2 - 0.2, -d / 2 + 0.2]]) box(x - 0.1, slab, z - 0.1, x + 0.1, roof - 0.3, z + 0.1);
+  const P = new Float32Array(pos); const I = new Uint32Array(idx);
+  const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < P.length; i += 3) for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], P[i + k]); max[k] = Math.max(max[k], P[i + k]); }
+  const pad = n => (4 - (n % 4)) % 4;
+  const pb = Buffer.from(P.buffer), ib = Buffer.from(I.buffer);
+  const bin = Buffer.concat([pb, Buffer.alloc(pad(pb.length)), ib, Buffer.alloc(pad(ib.length))]);
+  const walk = {
+    floors: [{ name: 'slab', ring: [[-w / 2, -d / 2], [w / 2, -d / 2], [w / 2, d / 2], [-w / 2, d / 2]], top: slab }],
+    solids: [{ name: 'wall', ring: [[-w / 2, d / 2 - 0.2], [w / 2, d / 2 - 0.2], [w / 2, d / 2], [-w / 2, d / 2]], base: slab, top: slab + wall }]
+  };
+  const doc = {
+    asset: { version: '2.0', generator: 'spatial-map fixture' },
+    scene: 0, scenes: [{ nodes: [0], extras: { walk } }],
+    nodes: [{ name: 'fixture house', mesh: 0, extras: { walk } }],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0 }, indices: 1, material: 0 }] }],
+    materials: [{ name: 'render', doubleSided: true, pbrMetallicRoughness: { baseColorFactor: [0.8, 0.75, 0.65, 1], metallicFactor: 0, roughnessFactor: 0.9 } }],
+    accessors: [
+      { bufferView: 0, componentType: 5126, count: P.length / 3, type: 'VEC3', min, max },
+      { bufferView: 1, componentType: 5125, count: I.length, type: 'SCALAR' }
+    ],
+    bufferViews: [
+      { buffer: 0, byteOffset: 0, byteLength: pb.length, target: 34962 },
+      { buffer: 0, byteOffset: pb.length + pad(pb.length), byteLength: ib.length, target: 34963 }
+    ],
+    buffers: [{ byteLength: bin.length }]
+  };
+  let json = Buffer.from(JSON.stringify(doc));
+  json = Buffer.concat([json, Buffer.alloc(pad(json.length), 0x20)]);
+  const header = Buffer.alloc(12); header.writeUInt32LE(0x46546c67, 0); header.writeUInt32LE(2, 4); header.writeUInt32LE(12 + 8 + json.length + 8 + bin.length, 8);
+  const jh = Buffer.alloc(8); jh.writeUInt32LE(json.length, 0); jh.writeUInt32LE(0x4e4f534a, 4);
+  const bh = Buffer.alloc(8); bh.writeUInt32LE(bin.length, 0); bh.writeUInt32LE(0x004e4942, 4);
+  return Buffer.concat([header, jh, json, bh, bin]);
+}
