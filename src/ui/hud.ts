@@ -26,6 +26,7 @@ export class Hud {
   private clock: HTMLElement;
   private loading: HTMLElement;
   private avatarLine: HTMLElement;
+  private packLine: HTMLElement;
   private frames = 0;
   private fps = 0;
   private last = performance.now();
@@ -35,7 +36,7 @@ export class Hud {
     this.root.className = 'hud';
     this.root.innerHTML = `
       <header class="hud-top">
-        <div class="brand"><span class="mark">◈</span><b>${esc(o.community)}</b><span class="sub">walkable world · v0.2</span></div>
+        <div class="brand"><span class="mark">◈</span><b>${esc(o.community)}</b><span class="sub">walkable world · v0.3</span></div>
         <div class="acts">
           <button class="btn" data-act="view" title="first / third person (C)">👤 view</button>
           <button class="btn" data-act="recentre" title="back to the start">⌖ recentre</button>
@@ -47,6 +48,7 @@ export class Hud {
           <input type="range" min="0" max="1439" step="5" value="${Math.round(o.hours * 60)}" data-el="time" aria-label="time of day">
         </label>
         <div class="sun" data-el="sun">sun —</div>
+        <div class="pack" data-el="pack" hidden></div>
         <div class="who" data-el="avatar" hidden></div>
       </div>
       <div class="readout" data-el="readout"></div>
@@ -59,6 +61,7 @@ export class Hud {
     this.clock = this.q('[data-el="clock"]');
     this.loading = this.q('[data-el="loading"]');
     this.avatarLine = this.q('[data-el="avatar"]');
+    this.packLine = this.q('[data-el="pack"]');
 
     this.q('[data-act="view"]').addEventListener('click', () => o.onView());
     this.q('[data-act="recentre"]').addEventListener('click', () => o.onRecentre());
@@ -76,6 +79,12 @@ export class Hud {
   setLoading(msg: string | null) {
     this.loading.hidden = msg == null;
     if (msg != null) (this.q('[data-el="loadmsg"]')).textContent = msg;
+  }
+
+  /** say what the pack brought — the survey's date, the trees, the aerial — or nothing */
+  setPack(text: string | null) {
+    this.packLine.hidden = !text;
+    this.packLine.textContent = text ?? '';
   }
 
   /** say which body is walking, once a real character has loaded */

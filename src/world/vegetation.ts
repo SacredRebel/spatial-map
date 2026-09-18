@@ -34,7 +34,12 @@ export interface VegetationOpts {
   keepOut?: KeepOut[];
   /** multiply every density by this — 0 plants nothing */
   density?: number;
+  /** a world-space XZ ring the rule stays out of — where a pack has the real trees on record */
+  exclude?: { x: number; z: number }[];
 }
+
+/** one tree as a record says it is: where, how tall, how wide, in world metres */
+export interface TreeRecord { x: number; z: number; height: number; crown: number }
 
 /**
  * A position-seeded random in [0,1).
@@ -175,6 +180,7 @@ export class Vegetation {
   counts: Record<string, number> = {};
   private centre = new THREE.Vector2(NaN, NaN);
   private meshes: THREE.InstancedMesh[] = [];
+  private records: THREE.InstancedMesh[] = [];
 
   constructor(private frame: Frame, private field: HeightField) {
     this.group.name = 'vegetation';
@@ -216,7 +222,8 @@ export class Vegetation {
   build(cx: number, cz: number, o: VegetationOpts) {
     this.dispose();
     const density = o.density ?? 1;
-    this.counts = {};
+    const keep = { record_oak: this.counts.record_oak ?? 0, record_shrub: this.counts.record_shrub ?? 0 };
+    this.counts = { ...keep };
     if (density <= 0) { this.centre.set(cx, cz); return; }
 
     for (let si = 0; si < SPECIES.length; si++) {
@@ -248,6 +255,7 @@ export class Vegetation {
           if (rand(gx, gz, si * 7 + 3) > p) continue;
 
           if (o.keepOut && o.keepOut.some(k => inRing(x, z, k.ring) || ringDistance(x, z, k.ring) < k.pad)) continue;
+          if (o.exclude && o.exclude.length >= 3 && inRing(x, z, o.exclude)) continue;
 
           const scale = sp.scale[0] + (sp.scale[1] - sp.scale[0]) * rand(gx, gz, si * 7 + 4);
           e.set(
@@ -286,12 +294,63 @@ export class Vegetation {
     this.centre.set(cx, cz);
   }
 
+  /**
+   * Plant what a record says is there.
+   *
+   *   The rule guesses; a record knows. Where a pack has the lidar's trees, each one is placed at
+   *   its own position with its own height and crown, and the rule is told to stay out of that
+   *   ground (`exclude`). These are built once and never move: they are the record, not a guess.
+   *   The oak's crown as modelled reads narrower than a closed canopy really is, so a tall tree
+   *   with a thin watershed basin is given at least a fifth of its height as crown radius.
+   */
+  buildRecords(list: TreeRecord[]) {
+    for (const m of this.records) { this.group.remove(m); (m.material as THREE.Material).dispose(); m.dispose(); }
+    this.records = [];
+    this.counts.record_oak = 0; this.counts.record_shrub = 0;
+    const OAK_H = 4.9, OAK_R = 2.35, SHRUB_H = 1.03, SHRUB_R = 0.8;
+    const groups: Record<'oak' | 'shrub', TreeRecord[]> = { oak: [], shrub: [] };
+    for (const t of list) (t.height >= 4.5 ? groups.oak : groups.shrub).push(t);
+    const q = new THREE.Quaternion(), e = new THREE.Euler(), v = new THREE.Vector3(), s = new THREE.Vector3();
+    for (const name of ['oak', 'shrub'] as const) {
+      const rows = groups[name];
+      this.counts[`record_${name}`] = rows.length;
+      if (!rows.length) continue;
+      const sp = SPECIES.find(x => x.name === name)!;
+      const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
+      const mesh = new THREE.InstancedMesh(sp.geometry, mat, rows.length);
+      mesh.name = `veg-record-${name}`;
+      mesh.castShadow = true; mesh.receiveShadow = true;
+      mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+      const H = name === 'oak' ? OAK_H : SHRUB_H, R = name === 'oak' ? OAK_R : SHRUB_R;
+      for (let i = 0; i < rows.length; i++) {
+        const t = rows[i];
+        const gx = Math.round(t.x * 10), gz = Math.round(t.z * 10);
+        const ll = this.frame.toLngLat(t.x, t.z);
+        const h = this.field.atOr(ll.lng, ll.lat, NaN);
+        const crown = Math.min(0.6 * t.height, Math.max(t.crown, 0.22 * t.height, 0.6));
+        e.set((rand(gx, gz, 21) - 0.5) * 0.08, rand(gx, gz, 22) * Math.PI * 2, (rand(gx, gz, 23) - 0.5) * 0.08);
+        q.setFromEuler(e);
+        v.set(t.x, isFinite(h) ? h : 0, t.z);
+        s.set(crown / R, t.height / H, crown / R);
+        mesh.setMatrixAt(i, new THREE.Matrix4().compose(v, q, s));
+        const tint = 0.8 + 0.4 * rand(gx, gz, 24);
+        mesh.setColorAt(i, new THREE.Color(tint, tint * (0.94 + 0.12 * rand(gx, gz, 25)), tint * 0.9));
+      }
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.frustumCulled = false;
+      this.records.push(mesh);
+      this.group.add(mesh);
+    }
+  }
+
   /** replant once the player has walked well into the outer part of the patch */
   update(x: number, z: number, o: VegetationOpts) {
     if (!this.meshes.length && !Object.keys(this.counts).length) { this.build(x, z, o); return; }
     if (Math.hypot(x - this.centre.x, z - this.centre.y) > o.radius * 0.4) this.build(x, z, o);
   }
 
+  /** clear the rule's plants; the records stay, they are not a guess to be redone */
   dispose() {
     for (const m of this.meshes) {
       this.group.remove(m);

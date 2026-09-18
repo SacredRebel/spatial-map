@@ -7,11 +7,23 @@
 //   Two rings: a fine one you are standing in and a coarse one out to the horizon. The fine ring is
 //   rebuilt as you leave it; the coarse one is built once, because at that distance a metre does
 //   not read. Vertex colours come from slope and height rather than a texture, so the first frame
-//   costs one fetch of elevation and nothing else — a photographic drape comes later, from NAIP.
+//   costs one fetch of elevation and nothing else.
+//
+//   When a pack names an aerial, the fine ring is draped with it: the tiles covering the ring are
+//   drawn into one canvas, the canvas becomes the ring's texture, and every vertex gets the UV of
+//   its own longitude and latitude in that canvas. Tiles arrive one by one and the texture updates
+//   as they do, so the ground is walkable before the photograph has finished loading. The coarse
+//   ring keeps its vertex colours: at a kilometre, colour is what reads, not pixels.
 
 import * as THREE from 'three';
-import type { Frame } from './geo';
+import { tileBounds, tilesCovering, type Frame } from './geo';
 import type { HeightField } from './heightfield';
+
+export interface Imagery {
+  /** {z}/{x}/{y} template — the county's caches put {y} before {x}, so the template spells the order */
+  template: string;
+  maxzoom: number;
+}
 
 export interface TerrainOpts {
   /** half-width of the square, in metres */
@@ -38,18 +50,127 @@ export class Terrain {
   private fine: THREE.Mesh | null = null;
   private coarse: THREE.Mesh | null = null;
   private fineCentre = new THREE.Vector2(NaN, NaN);
+  private fineOpts: TerrainOpts | null = null;
+  private imagery: Imagery | null = null;
+  private tileCache = new Map<string, Promise<HTMLImageElement | null>>();
+  private drapeGen = 0;
+  /** what the current drape is doing — the tests and the HUD read this */
+  imageryState = { z: 0, tiles: 0, loaded: 0, failed: 0, active: false };
+  /** resolves when every tile of the current drape has arrived or failed */
+  imageryReady: Promise<void> = Promise.resolve();
 
   constructor(private frame: Frame, private field: HeightField) {
     this.group.name = 'terrain';
   }
 
+  /** name the aerial to drape the fine ring with, or null to go back to colour by slope */
+  setImagery(im: Imagery | null) {
+    this.imagery = im;
+    if (this.fine && this.fineOpts) this.buildFine(this.fineCentre.x, this.fineCentre.y, this.fineOpts);
+  }
+
   /** build (or rebuild) the patch the player is standing in */
   buildFine(centreX: number, centreZ: number, o: TerrainOpts) {
-    if (this.fine) { this.group.remove(this.fine); this.fine.geometry.dispose(); }
+    if (this.fine) {
+      this.group.remove(this.fine);
+      this.fine.geometry.dispose();
+      const m = this.fine.material as THREE.MeshLambertMaterial;
+      m.map?.dispose();
+      m.dispose();
+    }
     this.fine = this.build(centreX, centreZ, o, 0);
     this.fine.name = 'terrain-fine';
     this.group.add(this.fine);
     this.fineCentre.set(centreX, centreZ);
+    this.fineOpts = o;
+    if (this.imagery) this.drape(this.fine, centreX, centreZ, o);
+    else this.imageryState = { z: 0, tiles: 0, loaded: 0, failed: 0, active: false };
+  }
+
+  // ---- the photograph -------------------------------------------------------------------------------
+  private drape(mesh: THREE.Mesh, cx: number, cz: number, o: TerrainOpts) {
+    const im = this.imagery!;
+    const gen = ++this.drapeGen;
+    const sw = this.frame.toLngLat(cx - o.radius, cz + o.radius);
+    const ne = this.frame.toLngLat(cx + o.radius, cz - o.radius);
+    const box: [number, number, number, number] = [sw.lng, sw.lat, ne.lng, ne.lat];
+
+    // the deepest zoom whose tile grid over the ring still fits one sane canvas
+    let z = Math.min(im.maxzoom, 19);
+    let tiles = tilesCovering(box, z);
+    let x0 = 0, x1 = 0, y0 = 0, y1 = 0;
+    for (;;) {
+      x0 = Math.min(...tiles.map(t => t.x)); x1 = Math.max(...tiles.map(t => t.x));
+      y0 = Math.min(...tiles.map(t => t.y)); y1 = Math.max(...tiles.map(t => t.y));
+      if ((x1 - x0 + 1) * (y1 - y0 + 1) <= 100 || z <= 12) break;
+      z--; tiles = tilesCovering(box, z);
+    }
+    const W = (x1 - x0 + 1) * 256, H = (y1 - y0 + 1) * 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    const g = canvas.getContext('2d')!;
+    g.fillStyle = '#8f9a6a';                    // the hillside's own colour until the photograph lands
+    g.fillRect(0, 0, W, H);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+
+    // UVs: each vertex at its own place in the tile grid, mercator in y because the tiles are
+    const west = tileBounds({ z, x: x0, y: y0 })[0], east = tileBounds({ z, x: x1, y: y1 })[2];
+    const north = tileBounds({ z, x: x0, y: y0 })[3], south = tileBounds({ z, x: x1, y: y1 })[1];
+    const mercY = (lat: number) => Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360));
+    const mS = mercY(south), mN = mercY(north);
+    const pos = mesh.geometry.getAttribute('position');
+    const uv = new Float32Array(pos.count * 2);
+    for (let i = 0; i < pos.count; i++) {
+      const ll = this.frame.toLngLat(pos.getX(i), pos.getZ(i));
+      uv[i * 2] = (ll.lng - west) / (east - west);
+      uv[i * 2 + 1] = (mercY(ll.lat) - mS) / (mN - mS);
+    }
+    mesh.geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    const mat = mesh.material as THREE.MeshLambertMaterial;
+    mat.map = tex;
+    mat.vertexColors = false;
+    mat.color.set('#ffffff');
+    mat.needsUpdate = true;
+
+    this.imageryState = { z, tiles: tiles.length, loaded: 0, failed: 0, active: true };
+    this.imageryReady = Promise.all(tiles.map(t => this.tile(im.template, t.z, t.x, t.y).then(img => {
+      if (gen !== this.drapeGen) return;          // the ring moved on; this photograph is for the old one
+      if (img) {
+        g.drawImage(img, (t.x - x0) * 256, (t.y - y0) * 256, 256, 256);
+        tex.needsUpdate = true;
+        this.imageryState.loaded++;
+      } else this.imageryState.failed++;
+    }))).then(() => {
+      // a photograph that never arrived is not a photograph: give the ring its slope colours back
+      if (gen === this.drapeGen && this.imageryState.loaded === 0) this.undrape(mesh);
+    });
+  }
+
+  private undrape(mesh: THREE.Mesh) {
+    const mat = mesh.material as THREE.MeshLambertMaterial;
+    mat.map?.dispose();
+    mat.map = null;
+    mat.vertexColors = true;
+    mat.needsUpdate = true;
+    this.imageryState.active = false;
+  }
+
+  /** one tile, fetched once and remembered, so a ring rebuilt a few metres on costs almost nothing */
+  private tile(template: string, z: number, x: number, y: number): Promise<HTMLImageElement | null> {
+    const url = template.replace('{z}', String(z)).replace('{x}', String(x)).replace('{y}', String(y));
+    const have = this.tileCache.get(url);
+    if (have) return have;
+    const p = new Promise<HTMLImageElement | null>(resolve => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => resolve(img);
+      img.onerror = () => resolve(null);
+      img.src = url;
+    });
+    this.tileCache.set(url, p);
+    return p;
   }
 
   /** the horizon, built once and left alone */
