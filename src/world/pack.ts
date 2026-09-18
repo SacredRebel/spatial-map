@@ -51,11 +51,15 @@ export interface FeatureCollection { type: 'FeatureCollection'; features: Featur
 export interface PackData {
   base: string;
   manifest: PackManifest;
+  /** the trees as they stand: the record with the owner's edits applied */
   trees: PackTree[];
+  /** how many of the record's trees an edit took down */
+  removed: number;
   survey: FeatureCollection;
   county: FeatureCollection;
   roofs: FeatureCollection;
   vision: FeatureCollection;
+  edits: FeatureCollection;
   imagery: PackImagery | null;
 }
 
@@ -108,6 +112,61 @@ export function parseTrees(csv: string, f: PackFrame): PackTree[] {
   return out;
 }
 
+// ---- what the owner has said differs from the record ----------------------------------------------
+//
+//   The record is never rewritten. A lidar flight is a fact about one day; what has changed since is
+//   another fact, dated and attributed, and it lives in its own layer. Each edit is one feature:
+//   `op` ("remove"), the `layer` it applies to, and either a Point with `radius_m` or a Polygon with
+//   `buffer_m`. Applying them here, once, at load, means every consumer sees the same present.
+
+type XY = { x: number; y: number };
+
+function inRing(p: XY, ring: XY[]): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const a = ring[i], b = ring[j];
+    if ((a.y > p.y) !== (b.y > p.y) && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
+}
+
+function ringDistance(p: XY, ring: XY[]): number {
+  let best = Infinity;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const a = ring[i], b = ring[j];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const l2 = dx * dx + dy * dy;
+    const t = l2 === 0 ? 0 : Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2));
+    const d = Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+    if (d < best) best = d;
+  }
+  return best;
+}
+
+/** Apply the pack's edits to its trees. Returns what stands, and how many the edits took down. */
+export function applyEdits(trees: PackTree[], edits: FeatureCollection, f: PackFrame): { trees: PackTree[]; removed: number } {
+  const toXY = ([lng, lat]: [number, number]): XY => ({ x: (lng - f.origin_lng) * f.metres_per_deg_lng, y: (lat - f.origin_lat) * f.metres_per_deg_lat });
+  const removals = edits.features.filter(e => e.properties.op === 'remove' && (e.properties.layer ?? 'trees') === 'trees');
+  if (!removals.length) return { trees, removed: 0 };
+  const gone = (t: PackTree): boolean => {
+    const p = toXY([t.lng, t.lat]);
+    for (const e of removals) {
+      const g = e.geometry;
+      if (g.type === 'Point') {
+        const r = Number(e.properties.radius_m);
+        if (isFinite(r) && Math.hypot(p.x - toXY(g.coordinates).x, p.y - toXY(g.coordinates).y) <= r) return true;
+      } else if (g.type === 'Polygon' && g.coordinates[0] && g.coordinates[0].length >= 3) {
+        const ring = g.coordinates[0].map(toXY);
+        const buffer = Math.max(0, Number(e.properties.buffer_m) || 0);
+        if (inRing(p, ring) || ringDistance(p, ring) <= buffer) return true;
+      }
+    }
+    return false;
+  };
+  const kept = trees.filter(t => !gone(t));
+  return { trees: kept, removed: trees.length - kept.length };
+}
+
 /** the directory the manifest lives in, whether the url named the file or the folder */
 export function packBase(url: string): string {
   const u = url.replace(/\/pack\.json$/, '');
@@ -123,18 +182,16 @@ export async function loadPack(url: string): Promise<PackData | null> {
   const file = (k: string) => (L[k] && typeof L[k].file === 'string' ? base + (L[k].file as string) : null);
   const fc = async (k: string) => (file(k) ? (await json<FeatureCollection>(file(k)!)) ?? EMPTY : EMPTY);
 
-  const [treesCsv, survey, county, roofs, vision] = await Promise.all([
+  const [treesCsv, survey, county, roofs, vision, edits] = await Promise.all([
     file('trees') ? text(file('trees')!) : Promise.resolve(null),
-    fc('survey'), fc('county'), fc('roofs'), fc('vision')
+    fc('survey'), fc('county'), fc('roofs'), fc('vision'), fc('edits')
   ]);
   const im = L.imagery;
   const imagery: PackImagery | null =
     im && im.kind === 'xyz' && typeof im.template === 'string'
       ? { kind: 'xyz', template: im.template, maxzoom: Number(im.maxzoom) || 18, attribution: im.attribution as string | undefined, captured: im.captured as string | undefined }
       : null;
-  return {
-    base, manifest,
-    trees: treesCsv ? parseTrees(treesCsv, manifest.frame) : [],
-    survey, county, roofs, vision, imagery
-  };
+  const record = treesCsv ? parseTrees(treesCsv, manifest.frame) : [];
+  const { trees, removed } = applyEdits(record, edits, manifest.frame);
+  return { base, manifest, trees, removed, survey, county, roofs, vision, edits, imagery };
 }

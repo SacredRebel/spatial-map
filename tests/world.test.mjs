@@ -7,7 +7,7 @@
 import { chromium } from 'playwright';
 import { existsSync } from 'fs';
 import { start } from './serve.mjs';
-import { height, ORIGIN, PACK_TREES, PACK_HOUSE, PACK_GARAGE, PACK_AOI } from './fixture.mjs';
+import { height, ORIGIN, PACK_TREES, PACK_STANDING, removedByEdits, PACK_HOUSE, PACK_GARAGE, PACK_AOI } from './fixture.mjs';
 
 const PORT = 5181;
 const BASE = `http://localhost:${PORT}`;
@@ -317,9 +317,14 @@ check('avatar: a file that will not load falls back to the built-in body rather 
 // to its measured height and stops you; the surveyed line is on the ground; the aerial is on it.
 const pk = await page.evaluate(() => {
   const w = window.world;
-  return { id: w.pack?.manifest?.id, trees: w.pack?.trees?.length, counts: w.vegetation.counts, today: w.today.counts };
+  return { id: w.pack?.manifest?.id, trees: w.pack?.trees?.length, removed: w.pack?.removed, edits: w.pack?.edits?.features?.length, counts: w.vegetation.counts, today: w.today.counts };
 });
-check('pack: the manifest and every layer load from the pack url', pk.id === 'fixture-pack' && pk.trees === PACK_TREES.length, pk);
+check('pack: the manifest and every layer load from the pack url', pk.id === 'fixture-pack' && pk.edits === 3 && pk.trees + pk.removed === PACK_TREES.length, pk);
+// the owner's edits are applied on top of the record, never written into it: three trees are gone,
+// two within 12 m of the house and one at a point, and a feature whose op is not "remove" does nothing
+check('pack: the edits take down exactly the trees they name and leave the record intact',
+  pk.removed === PACK_TREES.length - PACK_STANDING.length && pk.removed === 3 && pk.trees === PACK_STANDING.length,
+  { removed: pk.removed, standing: pk.trees, record: PACK_TREES.length });
 
 // read the record instances back: position and height from each instance matrix
 const records = await page.evaluate(() => {
@@ -339,17 +344,22 @@ const records = await page.evaluate(() => {
   return list;
 });
 {
-  const want = PACK_TREES.map(t => ({ lng: ORIGIN.lng + t.e / MX, lat: ORIGIN.lat + t.n / MY, height: t.height }));
+  const ll = t => ({ lng: ORIGIN.lng + t.e / MX, lat: ORIGIN.lat + t.n / MY, height: t.height });
+  const nearest = t => records.map(r => ({ r, d: Math.hypot((r.lng - t.lng) * MX, (r.lat - t.lat) * MY) })).sort((a, b) => a.d - b.d)[0];
   let worstPos = 0, worstH = 0, worstGround = 0;
-  for (const t of want) {
-    const near = records.map(r => ({ r, d: Math.hypot((r.lng - t.lng) * MX, (r.lat - t.lat) * MY) })).sort((a, b) => a.d - b.d)[0];
+  for (const t of PACK_STANDING.map(ll)) {
+    const near = nearest(t);
     worstPos = Math.max(worstPos, near.d);
     worstH = Math.max(worstH, Math.abs(near.r.height - t.height));
     worstGround = Math.max(worstGround, Math.abs(near.r.y - truth(t.lng, t.lat)));
   }
-  check('pack: every recorded tree stands where the record puts it, at its recorded height, on the ground',
-    records.length === PACK_TREES.length && worstPos < 0.05 && worstH < 0.05 && worstGround < 0.05,
+  check('pack: every standing tree is where the record puts it, at its recorded height, on the ground',
+    records.length === PACK_STANDING.length && worstPos < 0.05 && worstH < 0.05 && worstGround < 0.05,
     { planted: records.length, worstPositionM: +worstPos.toFixed(3), worstHeightM: +worstH.toFixed(3), worstGroundM: +worstGround.toFixed(3) });
+  // and nothing stands where an edit says a tree came down
+  const ghosts = PACK_TREES.filter(removedByEdits).map(ll).map(t => nearest(t).d);
+  check('pack: no tree stands where the owner said one came down', ghosts.length === 3 && Math.min(...ghosts) > 1,
+    { removed: ghosts.length, nearestStandingM: +Math.min(...ghosts).toFixed(1) });
 }
 const inside = await page.evaluate((aoi) => {
   const w = window.world;
@@ -425,7 +435,7 @@ check('pack: the aerial is draped over the fine ring — every tile drawn, the s
   drape.active && drape.tiles > 0 && drape.loaded === drape.tiles && drape.failed === 0 && drape.hasMap && drape.isCanvas && drape.vertexColours === false && drape.uv, drape);
 
 const hudPack = await page.evaluate(() => { const el = document.querySelector('[data-el="pack"]'); return { hidden: el.hidden, text: el.textContent }; });
-check('pack: the HUD says what the pack brought', !hudPack.hidden && /Fixture Hill/.test(hudPack.text) && /40 trees/.test(hudPack.text), hudPack);
+check('pack: the HUD says what the pack brought, and what has gone since', !hudPack.hidden && /Fixture Hill/.test(hudPack.text) && /37 trees/.test(hudPack.text) && /3 since gone/.test(hudPack.text), hudPack);
 
 // and without a pack, the world is what it was: the rule plants everywhere and nothing stands
 const bare = await ctx.newPage();

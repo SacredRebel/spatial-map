@@ -159,6 +159,16 @@ export const PACK_HOUSE = { e0: 35, n0: 26, e1: 45, n1: 34, roof: 3.6 };
 export const PACK_GARAGE = { e0: -46, n0: 25, e1: -34, n1: 35, roof: 4.0 };
 export const PACK_PAD = { e0: 37, n0: 42, e1: 43, n1: 48 };
 
+// the owner's edits: everything within 12 m of the house is gone, and so is one tree at a point.
+// (50,20) is 5 m from the house box and (50,40) is 7.8 m — both go; (60,20) at 15 m stays.
+export const PACK_EDITS = { houseBuffer: 12, point: { e: 90, n: -80, r: 5 } };
+const boxDistance = (e, n, b) => Math.hypot(Math.max(b.e0 - e, 0, e - b.e1), Math.max(b.n0 - n, 0, n - b.n1));
+export const removedByEdits = t =>
+  boxDistance(t.e, t.n, PACK_HOUSE) <= PACK_EDITS.houseBuffer ||
+  Math.hypot(t.e - PACK_EDITS.point.e, t.n - PACK_EDITS.point.n) <= PACK_EDITS.point.r;
+/** the trees as they stand once the edits are applied */
+export const PACK_STANDING = PACK_TREES.filter(t => !removedByEdits(t));
+
 export function packFiles(base) {
   const f = PACK_FRAME;
   const rows = PACK_TREES.map(t => {
@@ -179,9 +189,15 @@ export function packFiles(base) {
         roofs: { file: 'roofs.geojson', authority: 'derived', captured: '2018' },
         trees: { file: 'trees.csv', authority: 'derived', captured: '2018', columns: ['x_east_dm', 'y_north_dm', 'height_dm', 'crown_radius_dm', 'ground_dm'] },
         vision: { file: 'vision.geojson', authority: 'proposal' },
+        edits: { file: 'edits.geojson', authority: 'owner' },
         imagery: { kind: 'xyz', template: `${base}/aerial/{z}/{y}/{x}`, maxzoom: 18, captured: '2025' }
       }
     },
+    'edits.geojson': fc([
+      poly({ id: 'trees-around-the-house', op: 'remove', layer: 'trees', buffer_m: PACK_EDITS.houseBuffer, by: 'owner', reported: '2026-09-18' }, box(PACK_HOUSE.e0, PACK_HOUSE.n0, PACK_HOUSE.e1, PACK_HOUSE.n1)),
+      point({ id: 'one-tree', op: 'remove', layer: 'trees', radius_m: PACK_EDITS.point.r, by: 'owner' }, at(PACK_EDITS.point.e, PACK_EDITS.point.n)),
+      point({ id: 'not-a-removal', op: 'note', layer: 'trees', radius_m: 500, by: 'owner' }, at(0, 0))
+    ]),
     'trees.csv': 'x_east_dm,y_north_dm,height_dm,crown_radius_dm,ground_dm\n' + rows.join('\n') + '\n',
     'survey.geojson': fc([
       poly({ layer: 'boundary', authority: 'survey' }, box(-80, -80, 80, 80)),

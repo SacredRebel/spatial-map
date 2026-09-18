@@ -256,7 +256,10 @@ function packLine(p: PackData): string {
   const L = p.manifest.layers;
   const bits: string[] = [];
   if (L.survey) bits.push(`survey ${String(L.survey.date ?? '')}`.trim());
-  if (p.trees.length) bits.push(`${p.trees.length.toLocaleString()} trees (${String(L.trees?.captured ?? 'lidar')})`);
+  if (p.trees.length) {
+    const gone = p.removed ? `, ${p.removed} since gone` : '';
+    bits.push(`${p.trees.length.toLocaleString()} trees (${String(L.trees?.captured ?? 'lidar')}${gone})`);
+  }
   if (today.counts.buildings) bits.push(`${today.counts.buildings} standing`);
   if (p.imagery) bits.push(`aerial ${p.imagery.captured ?? ''}`.trim());
   return `${p.manifest.name} · ${bits.join(' · ')}`;
