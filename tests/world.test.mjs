@@ -434,6 +434,36 @@ const drape = await page.evaluate(() => {
 check('pack: the aerial is draped over the fine ring — every tile drawn, the slope colours retired, a uv for every vertex',
   drape.active && drape.tiles > 0 && drape.loaded === drape.tiles && drape.failed === 0 && drape.hasMap && drape.isCanvas && drape.vertexColours === false && drape.uv, drape);
 
+// the close-up: four ground tiles under the aerial and asphalt on the road, all named by the pack
+const grain = await page.evaluate(() => {
+  const w = window.world, m = w.terrain.group.getObjectByName('terrain-fine').material;
+  const road = w.today.group.getObjectByName('road:fixture-rd');
+  const mats = w.pack?.materials || {};
+  return {
+    materials: Object.keys(mats).sort(), absolute: Object.values(mats).every(x => /^http/.test(x.albedo)),
+    active: w.terrain.grainActive, patched: typeof m.onBeforeCompile === 'function' && m.customProgramCacheKey() === 'grain',
+    roadMap: !!(road && road.material.map), roadUv: !!(road && road.geometry.getAttribute('uv')),
+    programs: w.renderer.info.programs.length
+  };
+});
+check('grain: the pack names its close-up materials and the fine ring carries them under the aerial',
+  grain.materials.join() === 'asphalt,dirt,gravel,litter,straw' && grain.absolute && grain.active && grain.patched && grain.roadMap && grain.roadUv, grain);
+// the patched shader must actually draw: a compile error would surface as a console error and an unlit ring
+const grainPixel = await page.evaluate(() => {
+  const w = window.world;
+  w.player.setView('first');
+  w.renderer.render(w.scene, w.camera);
+  const gl = w.renderer.getContext();
+  const px = new Uint8Array(4 * 16 * 16);
+  gl.readPixels(Math.floor(gl.drawingBufferWidth / 2) - 8, 40, 16, 16, gl.RGBA, gl.UNSIGNED_BYTE, px);   // the ground just in front of the feet
+  let r = 0, g = 0, b = 0;
+  for (let i = 0; i < px.length; i += 4) { r += px[i]; g += px[i + 1]; b += px[i + 2]; }
+  w.player.setView('third');
+  return { r: r / 256, g: g / 256, b: b / 256 };
+});
+check('grain: the ground in front of the feet draws as lit straw, not black and not magenta',
+  grainPixel.r > 60 && grainPixel.g > 50 && grainPixel.r >= grainPixel.b && !(grainPixel.r > 200 && grainPixel.g < 40), grainPixel);
+
 const hudPack = await page.evaluate(() => { const el = document.querySelector('[data-el="pack"]'); return { hidden: el.hidden, text: el.textContent }; });
 check('pack: the HUD says what the pack brought, and what has gone since', !hudPack.hidden && /Fixture Hill/.test(hudPack.text) && /37 trees/.test(hudPack.text) && /3 since gone/.test(hudPack.text), hudPack);
 
@@ -469,7 +499,7 @@ const sun = await page.evaluate(() => {
   const out = [];
   for (const h of [6, 12, 18, 23]) {
     window.world.setTime(h);
-    const d = window.world.sky.sun.position.clone().normalize();
+    const d = window.world.sky.dir.clone();   // the sun's direction; the light itself now rides with the player
     out.push({ h, y: +d.y.toFixed(3), x: +d.x.toFixed(3), z: +d.z.toFixed(3) });
   }
   window.world.setTime(13.5);

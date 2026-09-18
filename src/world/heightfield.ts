@@ -17,6 +17,19 @@ const SIZE = 256;
 export interface Area { pid: string; bbox: [number, number, number, number]; tiles: number }
 export interface Index { minzoom: number; maxzoom: number; tileSize: number; areas: Area[] }
 
+/**
+ * A second, coarser source for the ground beyond the property: the same terrarium encoding, from
+ * a global set, so the ridge across the valley is a real ridge rather than the edge of the world.
+ * Zooms below the atlas's pyramid come from here; the property itself never does.
+ */
+export interface FarSource { template: string; minzoom: number; maxzoom: number }
+
+/** the global terrarium set the atlas itself uses beyond its baked pyramids (Mapzen / AWS Open Data) */
+export const GLOBAL_TERRAIN: FarSource = {
+  template: 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png',
+  minzoom: 0, maxzoom: 12
+};
+
 interface Loaded { id: TileId; bounds: [number, number, number, number]; h: Float32Array }
 
 const key = (t: TileId) => `${t.z}/${t.x}/${t.y}`;
@@ -30,7 +43,17 @@ export class HeightField {
   min = Infinity;
   max = -Infinity;
 
-  constructor(private origin: string) {}
+  constructor(private origin: string, private far: FarSource | null = null) {}
+
+  /** where a tile of this zoom comes from: the atlas's pyramid, or the far source below it */
+  private url(id: TileId): string | null {
+    const min = this.index?.minzoom ?? 13;
+    if (id.z >= min) return `${this.origin}/terrain/${id.z}/${id.x}/${id.y}.png`;
+    if (this.far && id.z >= this.far.minzoom && id.z <= this.far.maxzoom) {
+      return this.far.template.replace('{z}', String(id.z)).replace('{x}', String(id.x)).replace('{y}', String(id.y));
+    }
+    return null;
+  }
 
   async loadIndex(): Promise<Index | null> {
     try {
@@ -74,7 +97,9 @@ export class HeightField {
 
   private async fetchTile(id: TileId): Promise<Loaded | null> {
     try {
-      const r = await fetch(`${this.origin}/terrain/${id.z}/${id.x}/${id.y}.png`);
+      const url = this.url(id);
+      if (!url) return null;
+      const r = await fetch(url);
       if (!r.ok) return null;
       const bmp = await createImageBitmap(await r.blob());
       const c = new OffscreenCanvas(SIZE, SIZE);
@@ -96,7 +121,8 @@ export class HeightField {
 
   /** the deepest loaded tile covering a point, or null */
   private find(lng: number, lat: number): Loaded | null {
-    const max = this.index?.maxzoom ?? 17, min = this.index?.minzoom ?? 13;
+    const max = this.index?.maxzoom ?? 17;
+    const min = Math.min(this.index?.minzoom ?? 13, this.far ? this.far.minzoom : 99);
     for (let z = max; z >= min; z--) {
       const t = this.tiles.get(key(tileOf(lng, lat, z)));
       if (t) return t;

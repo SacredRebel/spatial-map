@@ -6,7 +6,7 @@
 //   house go", and it is the one on the map.
 //
 //   URL: ?community=sulphur-mountain&at=<lng>,<lat>,<heading>&t=<hours>&avatar=<url>&atlas=<origin>
-//        &pack=<url of a data pack, or 0 for none>
+//        &pack=<url of a data pack, or 0 for none>&far=<a coarse terrain template for the horizon, or 0>
 //
 //   A community may also have a PACK — one repository of that property's ground truth (the
 //   surveyed line, the roofs the lidar measured, every tree it saw, the road, the placed zones).
@@ -16,7 +16,7 @@
 
 import * as THREE from 'three';
 import { Frame } from './world/geo';
-import { HeightField } from './world/heightfield';
+import { HeightField, GLOBAL_TERRAIN } from './world/heightfield';
 import { Terrain } from './world/terrain';
 import { Vegetation } from './world/vegetation';
 import { Sky } from './world/sky';
@@ -25,6 +25,7 @@ import { Structures } from './world/structures';
 import { solidsFrom } from './world/collide';
 import { loadPack, type PackData } from './world/pack';
 import { Today } from './world/today';
+import { loadGrain, loadTile } from './world/grain';
 import { Player } from './player/player';
 import { loadAvatar } from './player/avatar';
 import { Hud } from './ui/hud';
@@ -47,8 +48,10 @@ const PACKS: Record<string, string> = {
 };
 
 const FINE = { radius: 320, segments: 257 };     // a vertex every 2.5 m out to 320 m
-const COARSE = { radius: 1600, segments: 129 };  // the horizon, a vertex every 25 m
+const COARSE = { radius: 1600, segments: 129 };  // the middle distance, a vertex every 25 m
+const FAR = { radius: 24000, segments: 257 };    // the ridges across the valley, a vertex every 190 m
 const PLANTED = { radius: 420 };                 // vegetation reaches past the fine ring's edge
+const HAZE = { near: 500, far: 26000 };          // aerial perspective: the far ring dissolves into the sky
 
 const qs = new URLSearchParams(location.search);
 const atlas = (qs.get('atlas') || DEFAULT_ATLAS).replace(/\/$/, '');
@@ -73,6 +76,9 @@ const avatarUrl = qs.get('avatar');
 const plantDensity = num('plants', 1, 0, 2);
 const packParam = qs.get('pack');
 const packUrl = packParam === '0' || packParam === 'none' ? null : packParam || PACKS[slug] || null;
+// the ground beyond the property: the global terrarium set, another {z}/{x}/{y} template, or none
+const farParam = qs.get('far');
+const farSource = farParam === '0' || farParam === 'none' ? null : farParam ? { template: farParam, minzoom: 0, maxzoom: 12 } : GLOBAL_TERRAIN;
 
 const app = document.getElementById('app')!;
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -81,13 +87,16 @@ renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+const EXPOSURE = 0.75;                           // at midday; the sky opens the eye further at dusk
+renderer.toneMappingExposure = EXPOSURE;
 app.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(58, innerWidth / innerHeight, 0.1, 12000);
+const camera = new THREE.PerspectiveCamera(58, innerWidth / innerHeight, 0.1, 60000);
 
 const frame = new Frame({ lng: start.lng, lat: start.lat });
-const field = new HeightField(atlas);
+const field = new HeightField(atlas, farSource);
 const terrain = new Terrain(frame, field);
 const vegetation = new Vegetation(frame, field);
 const sky = new Sky();
@@ -121,8 +130,11 @@ stick.show(touchCapable() || qs.get('stick') === '1');
 function applySun() {
   const { pos, horizon } = sky.set(instantAt(clockHours, community.tz), start.lat, start.lng);
   hud.setSun(pos.altitude, pos.azimuth);
-  scene.fog = new THREE.Fog(horizon.getHex(), 420, 4200);
-  renderer.setClearColor(horizon.getHex());
+  renderer.toneMappingExposure = EXPOSURE * sky.exposure;
+  // the haze is the colour the sky itself is at the horizon, so far ground dissolves into it
+  if (!scene.fog) scene.fog = new THREE.Fog(horizon, HAZE.near, HAZE.far);
+  else scene.fog.color.copy(horizon);
+  renderer.setClearColor(horizon);
 }
 
 /** the ring of the pack's area, in world metres — the rule stays out of it, the record fills it */
@@ -166,16 +178,20 @@ async function boot() {
     return;
   }
   const area = field.areaAt(start.lng, start.lat) || index.areas[0];
-  // the property itself at full detail, then a wider box so the ground does not end at the fence
+  // the property itself at full detail, then a wider box so the ground does not end at the fence,
+  // then the valley and the ridges beyond it from the coarse global set — the horizon is real ground
   await field.loadBox(area.bbox, index.maxzoom);
   const pad = 0.004;
   await field.loadBox(
     [area.bbox[0] - pad, area.bbox[1] - pad, area.bbox[2] + pad, area.bbox[3] + pad],
     Math.max(index.minzoom, index.maxzoom - 3)
   );
+  const around = (deg: number): [number, number, number, number] => [start.lng - deg, start.lat - deg, start.lng + deg, start.lat + deg];
+  if (farSource) await Promise.all([field.loadBox(around(0.05), 12), field.loadBox(around(0.3), 10)]);
 
   player.placeAt(start.lng, start.lat, start.heading);
   const p = player.position;
+  terrain.buildFar(p.x, p.z, FAR);
   terrain.buildCoarse(p.x, p.z, COARSE);
   terrain.buildFine(p.x, p.z, FINE);
   applySun();
@@ -191,7 +207,13 @@ async function boot() {
 
   if (pack) {
     hud.setLoading('reading what stands here…');
-    today.build(pack);
+    // the close-up tiles first, so what is built can carry them; a missing tile is a flat colour, never a wait
+    const [grain, asphalt] = await Promise.all([
+      loadGrain(pack.materials),
+      loadTile(pack.materials?.asphalt?.albedo_512 || pack.materials?.asphalt?.albedo)
+    ]);
+    today.build(pack, { asphalt, asphaltMetres: pack.materials?.asphalt?.metres });
+    if (grain) terrain.setGrain(grain);
     player.solids = player.solids.concat(today.solids);
     // the record's trees, at their own positions; the rule keeps out of the pack's ground
     vegetation.buildRecords(pack.trees.map(t => {
@@ -232,17 +254,14 @@ function loop() {
     terrain.update(p.x, p.z, FINE);
     vegetation.update(p.x, p.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity, exclude: packRing() });
     sky.mesh.position.copy(camera.position);
+    // the light rides with the player so the shadow map stays tight around them; its direction is
+    // the sun's. (It used to be derived from its own last position, which the same line had just
+    // overwritten — so the light sat on its target and, having no direction, lit nothing at all.)
     sky.sun.target.position.set(p.x, p.y, p.z);
-    sky.sun.position.copy(sky.sun.target.position).add(sunOffset());
+    sky.sun.position.copy(sky.sun.target.position).addScaledVector(sky.dir, 900);
     hud.frame(player.state(), field.loadedTiles);
   }
   renderer.render(scene, camera);
-}
-
-const _sunOffset = new THREE.Vector3();
-function sunOffset(): THREE.Vector3 {
-  // keep the shadow camera tight around the player by moving the light with them
-  return _sunOffset.copy(sky.sun.position).sub(sky.sun.target.position).setLength(900);
 }
 
 addEventListener('resize', () => {

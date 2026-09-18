@@ -9,7 +9,7 @@ import { createServer } from 'http';
 import { readFile, stat } from 'fs/promises';
 import { join, dirname, extname } from 'path';
 import { fileURLToPath } from 'url';
-import { index, tilePng, Z, packFiles, aerialPng } from './fixture.mjs';
+import { index, tilePng, Z, packFiles, aerialPng, tilePngFlat } from './fixture.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -85,6 +85,8 @@ export function start(port = PORT) {
         const type = file.endsWith('.csv') ? 'text/csv; charset=utf-8' : TYPES[extname(file)] || 'application/octet-stream';
         return send(res, 200, await readFile(file), type);
       }
+      const flat = /^\/tile\/([a-z]+)\.png$/.exec(p);
+      if (flat) return send(res, 200, tilePngFlat(flat[1]), TYPES['.png']);
       const air = /^\/aerial\/(\d+)\/(\d+)\/(\d+)$/.exec(p);
       if (air) {
         const [z, y, x] = air.slice(1).map(Number);

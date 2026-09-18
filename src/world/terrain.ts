@@ -4,10 +4,10 @@
 //   over a square of ground with the heights sampled into it — which means no seams, no cracks
 //   between levels of detail, and no bookkeeping about which tile owns which vertex.
 //
-//   Two rings: a fine one you are standing in and a coarse one out to the horizon. The fine ring is
-//   rebuilt as you leave it; the coarse one is built once, because at that distance a metre does
-//   not read. Vertex colours come from slope and height rather than a texture, so the first frame
-//   costs one fetch of elevation and nothing else.
+//   Three rings: a fine one you are standing in, a coarse one for the middle distance, and a far one
+//   out to the ridges across the valley. The fine ring is rebuilt as you leave it; the other two are
+//   built once, because at that distance a metre does not read. Vertex colours come from slope and
+//   height rather than a texture, so the first frame costs one fetch of elevation and nothing else.
 //
 //   When a pack names an aerial, the fine ring is draped with it: the tiles covering the ring are
 //   drawn into one canvas, the canvas becomes the ring's texture, and every vertex gets the UV of
@@ -18,6 +18,7 @@
 import * as THREE from 'three';
 import { tileBounds, tilesCovering, type Frame } from './geo';
 import type { HeightField } from './heightfield';
+import { applyGrain, type GrainTiles } from './grain';
 
 export interface Imagery {
   /** {z}/{x}/{y} template — the county's caches put {y} before {x}, so the template spells the order */
@@ -49,9 +50,13 @@ export class Terrain {
   group = new THREE.Group();
   private fine: THREE.Mesh | null = null;
   private coarse: THREE.Mesh | null = null;
+  private far: THREE.Mesh | null = null;
   private fineCentre = new THREE.Vector2(NaN, NaN);
   private fineOpts: TerrainOpts | null = null;
   private imagery: Imagery | null = null;
+  private grain: GrainTiles | null = null;
+  /** whether the fine ring currently carries the close-up grain — the tests read this */
+  grainActive = false;
   private tileCache = new Map<string, Promise<HTMLImageElement | null>>();
   private drapeGen = 0;
   /** what the current drape is doing — the tests and the HUD read this */
@@ -69,6 +74,12 @@ export class Terrain {
     if (this.fine && this.fineOpts) this.buildFine(this.fineCentre.x, this.fineCentre.y, this.fineOpts);
   }
 
+  /** give the fine ring its close-up tiles (they only show where an aerial is draped), or take them away */
+  setGrain(tiles: GrainTiles | null) {
+    this.grain = tiles;
+    if (this.fine && this.fineOpts) this.buildFine(this.fineCentre.x, this.fineCentre.y, this.fineOpts);
+  }
+
   /** build (or rebuild) the patch the player is standing in */
   buildFine(centreX: number, centreZ: number, o: TerrainOpts) {
     if (this.fine) {
@@ -83,6 +94,7 @@ export class Terrain {
     this.group.add(this.fine);
     this.fineCentre.set(centreX, centreZ);
     this.fineOpts = o;
+    this.grainActive = false;
     if (this.imagery) this.drape(this.fine, centreX, centreZ, o);
     else this.imageryState = { z: 0, tiles: 0, loaded: 0, failed: 0, active: false };
   }
@@ -132,6 +144,7 @@ export class Terrain {
     mat.map = tex;
     mat.vertexColors = false;
     mat.color.set('#ffffff');
+    if (this.grain) { applyGrain(mat, this.grain); this.grainActive = true; }
     mat.needsUpdate = true;
 
     this.imageryState = { z, tiles: tiles.length, loaded: 0, failed: 0, active: true };
@@ -155,6 +168,7 @@ export class Terrain {
     mat.vertexColors = true;
     mat.needsUpdate = true;
     this.imageryState.active = false;
+    this.grainActive = false;
   }
 
   /** one tile, fetched once and remembered, so a ring rebuilt a few metres on costs almost nothing */
@@ -173,13 +187,23 @@ export class Terrain {
     return p;
   }
 
-  /** the horizon, built once and left alone */
+  /** the middle distance, built once and left alone */
   buildCoarse(centreX: number, centreZ: number, o: TerrainOpts) {
     if (this.coarse) { this.group.remove(this.coarse); this.coarse.geometry.dispose(); }
     this.coarse = this.build(centreX, centreZ, o, -0.15);
     this.coarse.name = 'terrain-coarse';
     this.coarse.renderOrder = -1;
     this.group.add(this.coarse);
+  }
+
+  /** the horizon: the ridges across the valley, from the coarse global ground, dissolving into the haze */
+  buildFar(centreX: number, centreZ: number, o: TerrainOpts) {
+    if (this.far) { this.group.remove(this.far); this.far.geometry.dispose(); }
+    this.far = this.build(centreX, centreZ, o, -0.6);
+    this.far.name = 'terrain-far';
+    this.far.renderOrder = -2;
+    this.far.receiveShadow = false;
+    this.group.add(this.far);
   }
 
   /** the fine patch follows you, and is only rebuilt once you are well into its outer third */
@@ -240,12 +264,12 @@ export class Terrain {
   }
 
   dispose() {
-    for (const m of [this.fine, this.coarse]) {
+    for (const m of [this.fine, this.coarse, this.far]) {
       if (!m) continue;
       this.group.remove(m);
       m.geometry.dispose();
       (m.material as THREE.Material).dispose();
     }
-    this.fine = this.coarse = null;
+    this.fine = this.coarse = this.far = null;
   }
 }

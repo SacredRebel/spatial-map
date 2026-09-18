@@ -190,9 +190,11 @@ export function packFiles(base) {
         trees: { file: 'trees.csv', authority: 'derived', captured: '2018', columns: ['x_east_dm', 'y_north_dm', 'height_dm', 'crown_radius_dm', 'ground_dm'] },
         vision: { file: 'vision.geojson', authority: 'proposal' },
         edits: { file: 'edits.geojson', authority: 'owner' },
+        materials: { file: 'materials.json', authority: 'derived' },
         imagery: { kind: 'xyz', template: `${base}/aerial/{z}/{y}/{x}`, maxzoom: 18, captured: '2025' }
       }
     },
+    'materials.json': materialsJson(base),
     'edits.geojson': fc([
       poly({ id: 'trees-around-the-house', op: 'remove', layer: 'trees', buffer_m: PACK_EDITS.houseBuffer, by: 'owner', reported: '2026-09-18' }, box(PACK_HOUSE.e0, PACK_HOUSE.n0, PACK_HOUSE.e1, PACK_HOUSE.n1)),
       point({ id: 'one-tree', op: 'remove', layer: 'trees', radius_m: PACK_EDITS.point.r, by: 'owner' }, at(PACK_EDITS.point.e, PACK_EDITS.point.n)),
@@ -221,16 +223,58 @@ export function packFiles(base) {
   };
 }
 
-/** an aerial tile: one flat colour with a darker rim, so a draped ring is visibly a photograph and not the slope shading */
+/**
+ * An aerial tile of the fixture land, painted rather than photographed: dry straw everywhere, the
+ * road as a grey strip, the concrete pad pale, and a dark green disc of canopy over every tree in
+ * the pack. It is what a photograph of this hillside would show, so the grain has something real
+ * to read — straw where it is gold, gravel where it is grey, litter under the canopy.
+ */
 export function aerialPng(z, x, y) {
+  const b = tileBounds(x, y, z);
   const rgb = Buffer.alloc(SIZE * SIZE * 3);
-  const shade = 96 + ((x * 7 + y * 13) % 5) * 8;
+  const trees = PACK_TREES.map(t => ({ e: t.e, n: t.n, r: t.crown }));
   for (let j = 0; j < SIZE; j++) {
+    const lat = b.n - ((j + 0.5) / SIZE) * (b.n - b.s);
+    const n = (lat - ORIGIN.lat) * MY;
     for (let i = 0; i < SIZE; i++) {
+      const lng = b.w + ((i + 0.5) / SIZE) * (b.e - b.w);
+      const e = (lng - ORIGIN.lng) * MX;
       const k = (j * SIZE + i) * 3;
-      const rim = i < 2 || j < 2 || i >= SIZE - 2 || j >= SIZE - 2;
-      rgb[k] = rim ? 40 : shade; rgb[k + 1] = rim ? 40 : shade + 24; rgb[k + 2] = rim ? 40 : 70;
+      const speck = ((i * 31 + j * 17) % 7) * 3;                       // a little grain in the photograph itself
+      let r = 188 + speck, g = 168 + speck, bl = 133 + speck;          // straw, #bca885
+      if (Math.abs(n + 20) <= 2.2) { r = 138; g = 136; bl = 134; }      // the road, grey
+      if (e >= PACK_PAD.e0 && e <= PACK_PAD.e1 && n >= PACK_PAD.n0 && n <= PACK_PAD.n1) { r = 200; g = 196; bl = 188; }   // the pad, pale
+      for (const t of trees) {
+        if ((e - t.e) * (e - t.e) + (n - t.n) * (n - t.n) <= t.r * t.r) { r = 78; g = 107; bl = 63; break; }   // canopy, #4e6b3f
+      }
+      rgb[k] = r; rgb[k + 1] = g; rgb[k + 2] = bl;
     }
   }
   return png(SIZE, SIZE, rgb);
+}
+
+/**
+ * A close-up tile: a flat colour with a fine checker, so its mean is known and its grain is visible.
+ * The four ground tiles and the road's asphalt are all this, in five colours.
+ */
+export function tilePngFlat(name) {
+  const base = { straw: [188, 168, 133], dirt: [205, 184, 151], gravel: [199, 184, 159], litter: [154, 138, 112], asphalt: [86, 82, 72] }[name] || [128, 128, 128];
+  const rgb = Buffer.alloc(SIZE * SIZE * 3);
+  for (let j = 0; j < SIZE; j++) {
+    for (let i = 0; i < SIZE; i++) {
+      const k = (j * SIZE + i) * 3;
+      const d = ((i >> 3) + (j >> 3)) % 2 ? 12 : -12;
+      rgb[k] = base[0] + d; rgb[k + 1] = base[1] + d; rgb[k + 2] = base[2] + d;
+    }
+  }
+  return png(SIZE, SIZE, rgb);
+}
+
+/** the pack's materials manifest, pointing at the flat tiles the server paints */
+export function materialsJson(base) {
+  const m = {};
+  for (const [name, metres] of [['straw', 1.6], ['dirt', 2.0], ['gravel', 1.2], ['litter', 1.5], ['asphalt', 3.0]]) {
+    m[name] = { albedo: `${base}/tile/${name}.png`, albedo_512: `${base}/tile/${name}.png`, metres, source: { id: 'fixture' }, matched_to: null };
+  }
+  return { note: 'fixture materials', materials: m };
 }

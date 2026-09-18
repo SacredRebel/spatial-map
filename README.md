@@ -46,6 +46,7 @@ By default it reads the live atlas. Point it somewhere else with `?atlas=`:
 | `at` | `lng,lat,heading` — where to stand, and which way to face |
 | `atlas` | the origin to read the ground and the structures from |
 | `pack` | the data pack's URL (a folder, or its `pack.json`); `0` for none. Sulphur Mountain has a default |
+| `far` | a coarse `{z}/{x}/{y}` terrarium template for the ground beyond the property (default: the global Mapzen/AWS set); `0` for none |
 | `t` | the hour to start at, community wall time — `?t=8` is a winter morning's light |
 | `avatar` | a `.vrm` or `.glb` to walk in; anything that fails to load leaves you in the built-in body |
 | `stick` | `1` shows the thumbstick on a desktop |
@@ -66,10 +67,12 @@ tape measure.
 **`world/heightfield.ts`** — the ground as a function. Terrarium tiles are decoded once into height
 arrays and exposed as `at(lng, lat)`, bilinearly interpolated. The terrain mesh is that function
 sampled on a grid, and the walker stands on the same function — so what you see and what you walk on
-cannot disagree, and there are no seams between tiles.
+cannot disagree, and there are no seams between tiles. Below the atlas's pyramid a second, global
+terrarium set answers, so the ridges across the valley are real ridges 24 km out.
 
-**`world/terrain.ts`** — two rings. A fine one you are standing in (640 m across, a vertex every
-2.5 m) that is rebuilt as you leave it, and a coarse one out to the horizon built once. Vertex
+**`world/terrain.ts`** — three rings. A fine one you are standing in (640 m across, a vertex every
+2.5 m) that is rebuilt as you leave it, a coarse one for the middle distance, and a far one out to
+the ridges 24 km away that dissolves into the sky's own haze; the last two are built once. Vertex
 colours come from slope and height, so the first frame costs one fetch of elevation and nothing
 else. When a pack names an aerial, the fine ring is draped with it: the tiles over the ring go into
 one canvas, every vertex gets the UV of its own longitude and latitude, and the texture updates tile
@@ -80,8 +83,28 @@ ground. `pack.json` names the layers; nothing in a pack is required and a missin
 layer, never an error. `today` raises the county's footprints to the heights the lidar measured
 over them (and lays a "footprint" the lidar says is concrete flat), stands the roofs the county
 does not map, draws the surveyed line and the found monuments, the easement, the county ring faintly
-beside it so the drift is visible, the road as a strip on the ground, and a post with a label at
-every placed zone — gold where something already stands, violet where it is planned.
+beside it so the drift is visible, the road as a strip on the ground (with the pack's asphalt on
+it), and a post with a label at every placed zone — gold where something already stands, violet
+where it is planned. The record is never rewritten: what the owner says has changed goes in the
+pack's `edits` layer and is applied on top at load — fourteen trees are gone from around the house
+that way.
+
+**`world/grain.ts`** — the ground from a metre away. The aerial carries the colour of every square
+metre and, under your feet, none of the grain. The pack's `materials` name four tiles — straw,
+dirt, gravel, leaf litter — each a CC0 material recoloured to the owner's photographs of the land.
+The shader reads the aerial's own colour under each point to choose the tile (gold is straw, pale
+grey is gravel, green is canopy, and under a canopy the litter replaces the photograph outright),
+normalises the tile to its mean so it adds texture and not colour, and fades it out between 25 and
+90 m where the aerial takes over on its own.
+
+**`world/sky.ts`** — a dome calibrated to photographs of the place rather than to a scattering
+model. Three colours (zenith, the horizon away from the sun, the horizon towards it) keyed to the
+sun's altitude, a tight forward-scatter glow, and the disc; each key colour is a photographed sRGB
+value run backwards through the renderer's ACES curve, so noon straight up is the #5d8fd9 of the
+owner's July photograph. Sunlight itself keeps a physical part — the atmosphere's extinction at
+that altitude — which is what reddens the last hour. The same function gives the fog its colour and
+the sky light its tint, so the three always agree; and the exposure opens as the sun drops, the way
+an eye does.
 
 **`world/vegetation.ts`** — a rule and a record. The rule is the Ojai rule: coast live oak on the
 gentler, cooler, north-facing ground, chamise and ceanothus on the steep dry south faces, seeded by
@@ -127,9 +150,13 @@ against it headless and writes a screenshot.
 
 ## What is next
 
-- **The ground close up.** The aerial reads well from ten metres out; under your feet it wants a
-  tiled CC0 material (dry grass, chaparral soil) blended in near the camera, bark on the trunks,
-  shingle on the roofs.
+- **Bark and leaves.** The pack already carries an oak-bark tile; the trees want a real silhouette,
+  bark on the trunk and leaf cards for the crown, for all 3,649 of them.
+- **Buildings.** Stucco, metal and shingle instead of flat colour; doors and windows from the
+  owner's photographs of each building.
+- **The ground's own photographs.** The tiles are CC0 materials matched to the property's colours;
+  straight-down photographs of the straw, the drive and the litter would replace them with the
+  land's own grain.
 - **The house.** The new build as a `.glb`, sited from the surveyed line and never from the county
   ring, in the atlas's registry so it appears here the moment it is placed there.
 - **Reconciliation.** The lidar is 2018. A way to stand at a tree and say *this one is gone*, and

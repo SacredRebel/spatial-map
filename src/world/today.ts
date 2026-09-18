@@ -16,6 +16,9 @@ import type { HeightField } from './heightfield';
 import type { Solid } from './collide';
 import type { Feature, PackData } from './pack';
 
+/** close-up tiles the pack may supply for what stands: the road's surface, so far */
+export interface TodayTiles { asphalt?: THREE.Texture | null; asphaltMetres?: number }
+
 export interface TodayCounts {
   buildings: number; pads: number; monuments: number; roads: number; zones: number; lines: number;
 }
@@ -38,11 +41,11 @@ export class Today {
     this.group.name = 'today';
   }
 
-  build(pack: PackData) {
+  build(pack: PackData, tiles: TodayTiles = {}) {
     this.dispose();
     this.buildings(pack);
     this.survey(pack);
-    this.roads(pack);
+    this.roads(pack, tiles);
     this.zones(pack);
   }
 
@@ -177,13 +180,16 @@ export class Today {
 
   // ---- roads ----------------------------------------------------------------------------------------
   /** a strip of a fixed width laid along the centreline, hugging the ground */
-  private roads(pack: PackData) {
+  private roads(pack: PackData, tiles: TodayTiles) {
+    const metres = tiles.asphaltMetres || 3;
     for (const f of pack.county.features) {
       if (f.properties.layer !== 'road' || f.geometry.type !== 'LineString') continue;
       const centre = this.groundLine(f.geometry.coordinates, 0, 3);
       if (centre.length < 2) continue;
       const half = 2.2;
       const pos: number[] = [];
+      const uv: number[] = [];
+      let along = 0;
       for (let i = 0; i < centre.length; i++) {
         const p = centre[i];
         const q = centre[Math.min(centre.length - 1, i + 1)], o = centre[Math.max(0, i - 1)];
@@ -191,10 +197,12 @@ export class Today {
         const len = Math.hypot(dx, dz) || 1;
         dx /= len; dz /= len;
         const nx = -dz, nz = dx;                                  // the perpendicular, in the ground plane
+        if (i > 0) along += Math.hypot(p.x - centre[i - 1].x, p.z - centre[i - 1].z);
         for (const s of [-half, half]) {
           const x = p.x + nx * s, z = p.z + nz * s;
           const ll = this.frame.toLngLat(x, z);
           pos.push(x, this.field.atOr(ll.lng, ll.lat, p.y) + 0.06, z);
+          uv.push(s < 0 ? 0 : (2 * half) / metres, along / metres);   // the tile runs along the road, at its own scale
         }
       }
       const idx: number[] = [];
@@ -204,9 +212,13 @@ export class Today {
       }
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
       geo.setIndex(idx);
       geo.computeVertexNormals();
-      const mat = new THREE.MeshLambertMaterial({ color: ASPHALT, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
+      const mat = new THREE.MeshLambertMaterial({
+        color: tiles.asphalt ? '#ffffff' : ASPHALT, map: tiles.asphalt || null,
+        side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1
+      });
       const mesh = new THREE.Mesh(geo, mat);
       mesh.receiveShadow = true;
       mesh.name = `road:${slug(String(f.properties.name || 'road'))}`;

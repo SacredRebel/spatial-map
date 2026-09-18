@@ -48,6 +48,19 @@ export interface Feature {
 }
 export interface FeatureCollection { type: 'FeatureCollection'; features: Feature[] }
 
+/** one close-up material: what the ground, a road or a trunk looks like from a metre away */
+export interface PackMaterial {
+  /** absolute URLs, resolved against the pack */
+  albedo: string;
+  albedo_512?: string;
+  normal?: string;
+  /** how many metres one repeat of the tile covers */
+  metres: number;
+  source?: { id?: string; url?: string };
+  matched_to?: { srgb?: string; photo?: string; taken?: string; what?: string } | null;
+}
+export type PackMaterials = Record<string, PackMaterial>;
+
 export interface PackData {
   base: string;
   manifest: PackManifest;
@@ -61,6 +74,8 @@ export interface PackData {
   vision: FeatureCollection;
   edits: FeatureCollection;
   imagery: PackImagery | null;
+  /** close-up materials by name (straw, dirt, gravel, litter, asphalt, bark), or none */
+  materials: PackMaterials | null;
 }
 
 const EMPTY: FeatureCollection = { type: 'FeatureCollection', features: [] };
@@ -182,10 +197,21 @@ export async function loadPack(url: string): Promise<PackData | null> {
   const file = (k: string) => (L[k] && typeof L[k].file === 'string' ? base + (L[k].file as string) : null);
   const fc = async (k: string) => (file(k) ? (await json<FeatureCollection>(file(k)!)) ?? EMPTY : EMPTY);
 
-  const [treesCsv, survey, county, roofs, vision, edits] = await Promise.all([
+  const [treesCsv, survey, county, roofs, vision, edits, mats] = await Promise.all([
     file('trees') ? text(file('trees')!) : Promise.resolve(null),
-    fc('survey'), fc('county'), fc('roofs'), fc('vision'), fc('edits')
+    fc('survey'), fc('county'), fc('roofs'), fc('vision'), fc('edits'),
+    file('materials') ? json<{ materials?: Record<string, PackMaterial> }>(file('materials')!) : Promise.resolve(null)
   ]);
+  // the materials, with every path made absolute so the renderer can fetch them without knowing the pack
+  let materials: PackMaterials | null = null;
+  if (mats && mats.materials) {
+    materials = {};
+    for (const [name, m] of Object.entries(mats.materials)) {
+      if (!m || typeof m.albedo !== 'string') continue;
+      const abs = (u?: string) => (u ? (/^https?:/.test(u) ? u : base + u) : undefined);
+      materials[name] = { ...m, albedo: abs(m.albedo)!, albedo_512: abs(m.albedo_512), normal: abs(m.normal), metres: Number(m.metres) || 2 };
+    }
+  }
   const im = L.imagery;
   const imagery: PackImagery | null =
     im && im.kind === 'xyz' && typeof im.template === 'string'
@@ -193,5 +219,5 @@ export async function loadPack(url: string): Promise<PackData | null> {
       : null;
   const record = treesCsv ? parseTrees(treesCsv, manifest.frame) : [];
   const { trees, removed } = applyEdits(record, edits, manifest.frame);
-  return { base, manifest, trees, removed, survey, county, roofs, vision, edits, imagery };
+  return { base, manifest, trees, removed, survey, county, roofs, vision, edits, imagery, materials };
 }
