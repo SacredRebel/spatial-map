@@ -27,7 +27,7 @@ import { Vegetation } from './world/vegetation';
 import { Sky } from './world/sky';
 import { instantAt } from './world/sun';
 import { Structures } from './world/structures';
-import { solidsFrom } from './world/collide';
+import { solidsFrom, inRing } from './world/collide';
 import { loadPack, applyEdits, type PackData, type Feature } from './world/pack';
 import { Today, type TodayTiles } from './world/today';
 import { Build } from './world/build';
@@ -117,6 +117,26 @@ const sky = new Sky();
 const structures = new Structures(frame, field, atlas);
 const today = new Today(frame, field);
 const build = new Build(frame, field);
+
+/** everything a body can stand on or walk into, gathered from the registry, the record, and what is built */
+function refreshWalk() {
+  player.solids = solidsFrom(structures.list, frame, field, pid).concat(today.solids, build.solids, structures.solids);
+  player.platforms = build.platforms.concat(structures.platforms);
+}
+structures.onWalk = refreshWalk;
+
+/** the record's trees, less the ones a proposal stands on */
+function recordTrees() {
+  if (!pack) return [];
+  const taken = structures.occupied(pid);
+  const out: { x: number; z: number; height: number; crown: number }[] = [];
+  for (const t of pack.trees) {
+    const w = frame.toWorld(t.lng, t.lat);
+    if (taken.some(r => inRing(w.x, w.z, r))) continue;
+    out.push({ x: w.x, z: w.z, height: t.height, crown: t.crown });
+  }
+  return out;
+}
 const player = new Player(frame, field, camera, renderer.domElement);
 let pack: PackData | null = null;
 /** the close-up tiles the standing things carry, kept so a rebuild can carry them again */
@@ -205,20 +225,15 @@ function rebuild(edits: Feature[], changes: StructureChange[]) {
   }
   structures.list = mergeChanges(structuresBase, changes);
   structures.build(pid);
-  player.solids = solidsFrom(structures.list, frame, field, pid);
   if (pack) {
-    today.build(pack, tiles);
+    today.build(pack, tiles, structures.cleared(pid));
     const was = `${build.solids.length}:${build.platforms.length}:${build.counts.roofs}`;
     build.build(pack);
     if (`${build.solids.length}:${build.platforms.length}:${build.counts.roofs}` !== was) replant = true;   // nothing grows through a new floor
-    player.solids = player.solids.concat(today.solids, build.solids);
-    player.platforms = build.platforms;
-    vegetation.buildRecords(pack.trees.map(t => {
-      const w = frame.toWorld(t.lng, t.lat);
-      return { x: w.x, z: w.z, height: t.height, crown: t.crown };
-    }));
+    vegetation.buildRecords(recordTrees());
     hud.setPack(packLine(pack));
   }
+  refreshWalk();
   if (replant) {
     const p = player.position;
     vegetation.build(p.x, p.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity, exclude: packRing() });
@@ -326,7 +341,6 @@ async function boot() {
   }
   structuresBase = structures.list.slice();
   structures.build(area.pid);
-  player.solids = solidsFrom(structures.list, frame, field, area.pid);
 
   if (pack) {
     hud.setLoading('reading what stands here…');
@@ -336,19 +350,15 @@ async function boot() {
       loadTile(pack.materials?.asphalt?.albedo_512 || pack.materials?.asphalt?.albedo)
     ]);
     tiles = { asphalt, asphaltMetres: pack.materials?.asphalt?.metres };
-    today.build(pack, tiles);
+    today.build(pack, tiles, structures.cleared(area.pid));
     build.build(pack);
     if (grain) terrain.setGrain(grain);
-    player.solids = player.solids.concat(today.solids, build.solids);
-    player.platforms = build.platforms;
     // the record's trees, at their own positions; the rule keeps out of the pack's ground
-    vegetation.buildRecords(pack.trees.map(t => {
-      const w = frame.toWorld(t.lng, t.lat);
-      return { x: w.x, z: w.z, height: t.height, crown: t.crown };
-    }));
+    vegetation.buildRecords(recordTrees());
     if (pack.imagery) terrain.setImagery({ template: pack.imagery.template, maxzoom: pack.imagery.maxzoom });
     hud.setPack(packLine(pack));
   }
+  refreshWalk();
   // the changes made here last time and not yet saved come back on top of what is known
   editor.restore();
 
