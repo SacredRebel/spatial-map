@@ -799,6 +799,162 @@ check('ground: the terrain mesh is sampled again, the walker stands on the pad, 
   { rebuilt: shaped.after.fine !== shaped.before.fine, meshY: +shaped.meshY.toFixed(2), meshD: shaped.meshD, stood: +shaped.stood.toFixed(2), treesOn: shaped.treesOn, treeWorst: shaped.treeWorst });
 check('ground: undo gives the hill back', Math.abs(shaped.undone.inside - shaped.before.inside) < 1e-9 && shaped.undone.gen === shaped.before.gen + 2, shaped.undone);
 
+// ---- construction ------------------------------------------------------------------------------------------
+// A room is a floor, a closed wall with a door, and a roof, at real size on the half-metre grid.
+// The wall stops the walker except at the door; the floor is stood on; a window cut into the wall
+// is a hole in its geometry; a change to a part replaces it in place; a part is moved, turned and
+// taken down; and the agent can propose a room and a wall like anything else.
+const room = await page.evaluate(({ at }) => {
+  const w = window.world, ed = w.editor, p = w.player;
+  w.setSession({ role: 'admin', pin: '4242' });
+  ed.setActive(true);
+  const before = { unsaved: ed.unsaved, built: w.pack.build.features.length };
+  const wallId = ed.addRoom(at[0], at[1], { name: 'the studio', w: 6, d: 4, h: 2.7, wall: 'plaster', floor: 'wood', roof: 'gable', roofMaterial: 'tile', door: true }, 0);
+  const parts = w.pack.build.features.map(f => ({ id: f.properties.id, kind: f.properties.kind, structure: f.properties.structure }));
+  const drawn = parts.map(x => !!w.build.group.getObjectByName(`build:${x.id}`));
+  const wallF = w.pack.build.features.find(f => f.properties.kind === 'wall');
+  const floorF = w.pack.build.features.find(f => f.properties.kind === 'floor');
+  const roofF = w.pack.build.features.find(f => f.properties.kind === 'roof');
+  const wallMesh = w.build.group.getObjectByName(`build:${wallId}`);
+  const box = new w.THREE.Box3().setFromObject(wallMesh);
+  // the room's corners in world metres: the centre snapped to the half metre, six by four, the first side south
+  const c = w.frame.toWorld(at[0], at[1]);
+  const cs = { x: Math.round(c.x / 0.5) * 0.5, z: Math.round(c.z / 0.5) * 0.5 };
+  const ground = Math.min(...wallF.geometry.coordinates.map(([lng, lat]) => w.field.at(lng, lat)));
+  const pos = wallMesh.geometry.getAttribute('position');
+  let headVerts = 0;
+  for (let i = 0; i < pos.count; i++) if (Math.abs(pos.getY(i) - (ground + 0.2 + 2.1)) < 0.005) headVerts++;
+  // walk north through the door in the middle of the south side, then into the wall two metres east of it
+  const walkNorth = (x, z) => {
+    const ll = w.frame.toLngLat(x, z);
+    w.goto(ll.lng, ll.lat, 0);
+    p.key('w', true);
+    for (let i = 0; i < 4; i++) p.update(1);
+    p.key('w', false);
+    const s = p.state();
+    const e = w.frame.toWorld(s.lng, s.lat);
+    return { z: +(e.z - cs.z).toFixed(2), x: +(e.x - cs.x).toFixed(2), touching: s.touching, ground: s.groundM };
+  };
+  const throughDoor = walkNorth(cs.x, cs.z + 5);
+  const intoWall = walkNorth(cs.x + 2, cs.z + 5);
+  const hud = document.querySelector('[data-el="pack"]').textContent;
+  return { before, wallId, parts, drawn, counts: { ...w.build.counts }, solids: w.build.solids.length, platforms: w.build.platforms.length, unsaved: ed.unsaved,
+    wall: { height: +wallF.properties.height_m, openings: wallF.properties.openings, closed: wallF.geometry.coordinates.length, structure: wallF.properties.structure },
+    floorId: floorF.properties.id, roofId: roofF.properties.id, roof: { form: roofF.properties.form, ridge: roofF.properties.ridge_deg, eaves: roofF.properties.eaves_m },
+    box: { w: +(box.max.x - box.min.x).toFixed(2), d: +(box.max.z - box.min.z).toFixed(2), bottom: +(box.min.y - ground).toFixed(2), top: +(box.max.y - ground).toFixed(2) },
+    headVerts, throughDoor, intoWall, ground, hud, sel: ed.selection?.kind, label: document.querySelector('.ep-sel b')?.textContent };
+}, { at: at(60, -60) });
+check('room: a room put down is three parts of one structure — a floor, a closed wall with a door, a gable roof — all drawn, and the HUD counts them',
+  room.parts.length === room.before.built + 3 && room.drawn.every(Boolean) && room.parts.every(x => x.structure === 'the studio') && room.counts.walls === 1 && room.counts.floors === 1 && room.counts.roofs === 1 && room.counts.openings === 1
+    && room.wall.closed === 5 && room.wall.openings.length === 1 && room.wall.openings[0].kind === 'door' && room.roof.form === 'gable' && room.roof.ridge === 90 && room.unsaved === room.before.unsaved + 3 && /3 built/.test(room.hud) && room.sel === 'build' && /wall/.test(room.label || ''),
+  { parts: room.parts, counts: room.counts, wall: room.wall, roof: room.roof, hud: room.hud, sel: room.sel, label: room.label });
+check('room: the wall is six by four metres outside to outside plus its thickness, stands 2.7 m over the slab, and its door head is cut at 2.1 m',
+  Math.abs(room.box.w - 6.25) < 0.02 && Math.abs(room.box.d - 4.25) < 0.02 && Math.abs(room.box.bottom - 0.2) < 0.02 && Math.abs(room.box.top - 2.9) < 0.02 && room.headVerts >= 4,
+  { box: room.box, headVerts: room.headVerts });
+check('room: the walker goes in through the door and is stopped by the wall beside it; inside, the floor is the ground',
+  room.throughDoor.z < 1.5 && room.throughDoor.z > -2 && Math.abs(room.throughDoor.ground - (room.ground + 0.2)) < 0.03
+    && room.intoWall.z > 2.3 && room.intoWall.z < 2.8 && room.intoWall.touching === room.wallId && room.solids >= 2 && room.platforms === 1,
+  { throughDoor: room.throughDoor, intoWall: room.intoWall, slab: +(room.ground + 0.2).toFixed(2), solids: room.solids });
+
+const changed = await page.evaluate(({ wallId, floorId, roofId, arc }) => {
+  const w = window.world, ed = w.editor;
+  const verts = () => w.build.group.getObjectByName(`build:${wallId}`).geometry.getAttribute('position').count;
+  const edits = () => ed.edits.filter(f => f.properties.layer === 'build').length;
+  const plain = verts();
+  const n0 = edits();
+  ed.addOpening(wallId, 8, { kind: 'window', width: 1.2, sill: 0.9, head: 2.0 });
+  const windowed = { verts: verts(), openings: ed.buildFeature(wallId).properties.openings.length, edits: edits() };
+  ed.removeOpening(wallId, 1);
+  const unwindowed = { verts: verts(), openings: ed.buildFeature(wallId).properties.openings.length };
+  ed.updateBuild(wallId, { height_m: 3.5, material: 'stone' });
+  const f = ed.buildFeature(wallId);
+  const box = new w.THREE.Box3().setFromObject(w.build.group.getObjectByName(`build:${wallId}`));
+  const taller = { height: f.properties.height_m, material: f.properties.material, span: +(box.max.y - box.min.y).toFixed(2), edits: edits() };
+  // move the floor two metres east, turn the roof a quarter turn
+  const centre = id => ed.buildCentre(ed.buildFeature(id));
+  const c0 = centre(floorId);
+  ed.moveBuild(floorId, 2, 0);
+  const c1 = centre(floorId);
+  const ridge0 = ed.buildFeature(roofId).properties.ridge_deg;
+  ed.rotateBuild(roofId, 90);
+  const ridge1 = ed.buildFeature(roofId).properties.ridge_deg;
+  // a curved wall through four points: sampled every half metre, so many more vertices than its straight twin
+  const straightId = ed.addWall(arc, { height: 2.4, thick: 0.3, material: 'adobe', smooth: false, base: 0, structure: '' });
+  const straightVerts = w.build.group.getObjectByName(`build:${straightId}`).geometry.getAttribute('position').count;
+  const curvedId = ed.addWall(arc, { height: 2.4, thick: 0.3, material: 'adobe', smooth: true, base: 0, structure: '' });
+  const curvedVerts = w.build.group.getObjectByName(`build:${curvedId}`).geometry.getAttribute('position').count;
+  const curvedSolids = w.build.solids.filter(s => s.id === curvedId).length;
+  // taking down: a part never saved simply vanishes; one the pack holds becomes a removal to propose
+  ed.removeBuild(straightId);
+  const vanished = { drawn: !!w.build.group.getObjectByName(`build:${straightId}`), removal: ed.edits.some(x => x.properties.op === 'remove' && x.properties.target === straightId) };
+  const saved = JSON.parse(JSON.stringify(ed.buildFeature(curvedId)));
+  w.pack.edits.features.push(saved);
+  ed.edits = ed.edits.filter(x => x.properties.id !== curvedId);
+  w.rebuild();
+  const heldByPack = !!w.build.group.getObjectByName(`build:${curvedId}`);
+  ed.removeBuild(curvedId);
+  const removal = ed.edits.find(x => x.properties.op === 'remove' && x.properties.layer === 'build' && x.properties.target === curvedId);
+  const takenDown = { drawn: !!w.build.group.getObjectByName(`build:${curvedId}`), removal: !!removal, what: removal?.properties.what };
+  w.pack.edits.features.splice(w.pack.edits.features.indexOf(saved), 1);
+  const stored = JSON.parse(localStorage.getItem('spatial-map:edits:fixture-pack')).edits.filter(x => x.properties.layer === 'build').length;
+  return { plain, n0, windowed, unwindowed, taller, moved: { east: +(c1.x - c0.x).toFixed(2), south: +(c1.z - c0.z).toFixed(2) }, ridge: [ridge0, ridge1], straightVerts, curvedVerts, curvedSolids, vanished, heldByPack, takenDown, stored, unsaved: ed.unsaved };
+}, { wallId: room.wallId, floorId: room.floorId, roofId: room.roofId, arc: [at(80, -40), at(84, -34), at(90, -32), at(96, -34)] });
+check('construction: a window cut into the wall is a hole in its geometry, and taking it out closes it',
+  changed.windowed.verts > changed.plain && changed.windowed.openings === 2 && changed.windowed.edits === changed.n0 && changed.unwindowed.verts === changed.plain && changed.unwindowed.openings === 1,
+  { plain: changed.plain, windowed: changed.windowed, unwindowed: changed.unwindowed });
+check('construction: a change to a part replaces it in place — the wall 3.5 m high in stone, still one edit; the floor moved 2 m east; the roof turned a quarter',
+  changed.taller.height === 3.5 && changed.taller.material === 'stone' && Math.abs(changed.taller.span - 3.5) < 0.02 && changed.taller.edits === changed.n0
+    && Math.abs(changed.moved.east - 2) < 0.01 && Math.abs(changed.moved.south) < 0.01 && changed.ridge[1] === (changed.ridge[0] + 90) % 360,
+  { taller: changed.taller, moved: changed.moved, ridge: changed.ridge });
+check('construction: a curved wall is the same points bent into a curve sampled every half metre — many more vertices, and one solid run',
+  changed.curvedVerts > changed.straightVerts * 3 && changed.curvedSolids === 1, { straight: changed.straightVerts, curved: changed.curvedVerts, solids: changed.curvedSolids });
+check('construction: taking down a part never saved makes it vanish; taking down one the pack holds is a removal to propose, and it is gone from the ground',
+  !changed.vanished.drawn && !changed.vanished.removal && changed.heldByPack && !changed.takenDown.drawn && changed.takenDown.removal && changed.takenDown.what === 'wall' && changed.stored >= 4,
+  { vanished: changed.vanished, heldByPack: changed.heldByPack, takenDown: changed.takenDown, stored: changed.stored });
+
+// the agent proposes a room and a wall; taken, they are parts like any drawn by hand
+const proposedRoom = await page.evaluate(async ({ at }) => {
+  const w = window.world, ed = w.editor, mg = w.magic;
+  const id = ed.addMagic(at[0], at[1], 'the terrace');
+  const turn = await mg.send('an annex here');
+  const n0 = w.pack.build.features.length;
+  mg.takeAll(mg.turns.length - 1);
+  const parts = w.pack.build.features.slice(n0);
+  const studio = parts.filter(f => f.properties.structure === 'the annex');
+  const stone = parts.find(f => f.properties.material === 'stone');
+  const roof = studio.find(f => f.properties.kind === 'roof');
+  const floor = studio.find(f => f.properties.kind === 'floor');
+  const c = ed.buildCentre(floor);
+  const b = w.frame.toWorld(at[0], at[1]);
+  ed.openMagic(null);
+  return { actions: turn?.actions?.map(a => a.type), parts: parts.length, studio: studio.length, vault: roof?.properties.form, adobe: studio.find(f => f.properties.kind === 'wall')?.properties.material, east: +(c.x - b.x).toFixed(1), north: +(b.z - c.z).toFixed(1), stone: { height: stone?.properties.height_m, doors: stone?.properties.openings?.length, at: stone?.properties.openings?.[0]?.at_m } };
+}, { at: at(-60, -60) });
+check('magic: the agent proposes a room and a stone wall with a door; taken, the annex stands 15 m east of the box in adobe under a vault, and the wall has its door 4 m along',
+  proposedRoom.actions?.join() === 'room,wall' && proposedRoom.parts === 4 && proposedRoom.studio === 3 && proposedRoom.vault === 'vault' && proposedRoom.adobe === 'adobe' && Math.abs(proposedRoom.east - 15) < 0.6 && Math.abs(proposedRoom.north) < 0.6
+    && proposedRoom.stone.height === 2 && proposedRoom.stone.doors === 1 && proposedRoom.stone.at === 4, proposedRoom);
+
+// a member reads a part
+const readPart = await page.evaluate(({ wallId }) => {
+  const w = window.world;
+  const f = w.editor.buildFeature(wallId);
+  const obj = w.build.group.getObjectByName(`build:${wallId}`);
+  w.inspect.show({ kind: 'build', id: wallId, feature: f, object: obj, point: obj.position.clone() });
+  const card = document.querySelector('.inspect');
+  return { hidden: card.hidden, text: card.textContent };
+}, { wallId: room.wallId });
+check('read: a click on a wall says what it is — the structure, its length, height and material, and that the owner built it',
+  !readPart.hidden && /the studio · wall/.test(readPart.text) && /3\.5 m high/.test(readPart.text) && /stone/.test(readPart.text) && /one of 3 parts/.test(readPart.text) && /built by the owner/.test(readPart.text), readPart);
+// the parts go to the atlas with everything else
+const savedParts = await page.evaluate(async () => {
+  const w = window.world;
+  const n = w.editor.edits.filter(f => f.properties.layer === 'build').length;
+  const r = await w.editor.save('4242');
+  return { n, r, built: w.pack.build.features.length };
+});
+check('save: the parts go to the atlas as build features and, applied, become part of the pack',
+  savedParts.n >= 7 && savedParts.r.ok && server.proposals[server.proposals.length - 1].edits.filter(f => f.properties.layer === 'build').length === savedParts.n && savedParts.built >= 7, { ...savedParts, sent: server.proposals.length });
+await page.evaluate(() => { const w = window.world; w.inspect.hide(); w.editor.setActive(false); });
+
 // ---- a member reads --------------------------------------------------------------------------------------
 const read = await page.evaluate(() => {
   const w = window.world;

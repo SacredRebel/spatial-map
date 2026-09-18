@@ -14,6 +14,7 @@
 import type { Editor } from './editor';
 import type { PackData } from '../world/pack';
 import type { Session } from '../world/roles';
+import type { RoofForm } from '../world/build';
 
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
 
@@ -25,7 +26,11 @@ export type Action =
   | { type: 'remove_trees'; radius_m: number; e?: number; n?: number }
   | { type: 'plant_tree'; height_m: number; e?: number; n?: number }
   | { type: 'zone'; name: string; kind: string; points: [number, number][]; e?: number; n?: number }
-  | { type: 'terrain'; op: 'flatten' | 'raise' | 'lower'; height_m: number; edge_m: number; points: [number, number][]; e?: number; n?: number };
+  | { type: 'terrain'; op: 'flatten' | 'raise' | 'lower'; height_m: number; edge_m: number; points: [number, number][]; e?: number; n?: number }
+  | { type: 'wall'; points: [number, number][]; height_m: number; thick_m: number; material: string; smooth?: boolean; structure?: string; door_at_m?: number; e?: number; n?: number }
+  | { type: 'floor'; points: [number, number][]; level_m: number; material: string; structure?: string; e?: number; n?: number }
+  | { type: 'roof'; points: [number, number][]; form: RoofForm; eaves_m: number; pitch_deg: number; material: string; structure?: string; e?: number; n?: number }
+  | { type: 'room'; name: string; w: number; d: number; h: number; wall: string; roof: RoofForm; door: boolean; e?: number; n?: number; heading?: number };
 
 export interface Turn { role: 'you' | 'agent'; text: string; actions?: Action[]; taken?: boolean[]; at: number }
 
@@ -88,7 +93,7 @@ export class Magic {
     this.turns = [];
     if (id) {
       try { const raw = localStorage.getItem(KEY(id)); if (raw) this.turns = JSON.parse(raw); } catch { this.turns = []; }
-      if (!this.turns.length) this.turns.push({ role: 'agent', text: 'I am here. Tell me what you want at this spot — a block of some size, a fence, a marker, a territory, the ground flattened or raised, trees taken down — and I will lay it out for you to take or leave.', at: Date.now() });
+      if (!this.turns.length) this.turns.push({ role: 'agent', text: 'I am here. Tell me what you want at this spot — a room of some size, a wall, a floor, a roof, a block, a fence, a marker, a territory, the ground flattened or raised, trees taken down — and I will lay it out for you to take or leave.', at: Date.now() });
     }
     this.render();
   }
@@ -168,6 +173,14 @@ export class Magic {
       case 'plant_tree': ed.addTree(lng, lat, a.height_m); break;
       case 'zone': ed.addZone(a.points.map(([e, n]) => this.at(e, n)), a.name || a.kind, a.kind); break;
       case 'terrain': ed.addShaping(a.points.map(([e, n]) => this.at(e, n)), a.op, a.height_m, a.edge_m); break;
+      case 'wall': {
+        const id = ed.addWall(a.points.map(([e, n]) => this.at(e, n)), { height: a.height_m, thick: a.thick_m, material: a.material, smooth: !!a.smooth, base: 0, structure: a.structure ?? '' });
+        if (id && a.door_at_m != null) ed.addOpening(id, a.door_at_m, { kind: 'door', width: 0.9, sill: 0, head: Math.min(2.1, a.height_m - 0.2) });
+        break;
+      }
+      case 'floor': ed.addFloor(a.points.map(([e, n]) => this.at(e, n)), { level: a.level_m, thick: 0.2, material: a.material, structure: a.structure ?? '' }); break;
+      case 'roof': ed.addRoof(a.points.map(([e, n]) => this.at(e, n)), { form: a.form, eaves: a.eaves_m, pitch: a.pitch_deg, overhang: 0.5, material: a.material, structure: a.structure ?? '' }); break;
+      case 'room': ed.addRoom(lng, lat, { name: a.name || 'room', w: a.w, d: a.d, h: a.h, wall: a.wall, floor: 'wood', roof: a.roof, roofMaterial: 'tile', door: a.door !== false }, a.heading ?? this.o.heading()); break;
       default: return false;
     }
     turn.taken![actionIndex] = true;
@@ -201,6 +214,10 @@ export class Magic {
         case 'plant_tree': return `🌳 plant a ${a.height_m} m tree${where}`;
         case 'zone': return `⬠ ${esc(a.kind)} “${esc(a.name)}”, ${a.points.length} corners`;
         case 'terrain': return `⛰ ${a.op} the ground${a.op === 'flatten' ? '' : ` by ${a.height_m} m`} inside ${a.points.length} corners, bank ${a.edge_m} m`;
+        case 'wall': return `▬ ${a.smooth ? 'curved ' : ''}${esc(a.material)} wall, ${a.points.length} points, ${a.height_m} m high${a.door_at_m != null ? ', with a door' : ''}${a.structure ? ` (${esc(a.structure)})` : ''}`;
+        case 'floor': return `▱ ${esc(a.material)} floor, ${a.points.length} corners${a.level_m ? `, ${a.level_m} m up` : ''}${a.structure ? ` (${esc(a.structure)})` : ''}`;
+        case 'roof': return `⌂ ${esc(a.form)} ${esc(a.material)} roof, eaves ${a.eaves_m} m, ${a.pitch_deg}°${a.structure ? ` (${esc(a.structure)})` : ''}`;
+        case 'room': return `⌂ room “${esc(a.name)}” ${a.w} × ${a.d} m, ${a.h} m high, ${esc(a.wall)} walls, ${esc(a.roof)} roof${a.door === false ? '' : ', a door'}${where}`;
       }
     };
     const turns = this.turns.map((t, i) => `<div class="mg-turn ${t.role}">

@@ -30,6 +30,7 @@ import { Structures } from './world/structures';
 import { solidsFrom } from './world/collide';
 import { loadPack, applyEdits, type PackData, type Feature } from './world/pack';
 import { Today, type TodayTiles } from './world/today';
+import { Build } from './world/build';
 import { loadGrain, loadTile } from './world/grain';
 import { Editor } from './edit/editor';
 import { Panel } from './edit/panel';
@@ -115,6 +116,7 @@ const vegetation = new Vegetation(frame, field);
 const sky = new Sky();
 const structures = new Structures(frame, field, atlas);
 const today = new Today(frame, field);
+const build = new Build(frame, field);
 const player = new Player(frame, field, camera, renderer.domElement);
 let pack: PackData | null = null;
 /** the close-up tiles the standing things carry, kept so a rebuild can carry them again */
@@ -126,7 +128,7 @@ let session: Session = loadSession();
 const caps = () => CAPS[session.role];
 const grid = new GroundGrid(frame, field);
 
-scene.add(terrain.group, vegetation.group, structures.group, today.group, player.object, grid.group);
+scene.add(terrain.group, vegetation.group, structures.group, today.group, build.group, player.object, grid.group);
 sky.addTo(scene);
 
 // the clock is the community's own wall time, not the viewer's: a shadow at half past two means
@@ -145,7 +147,7 @@ const hud = new Hud(app, {
 });
 
 const editor = new Editor({
-  dom: renderer.domElement, camera, frame, field, player, vegetation, today, structures, grid, scene, atlas,
+  dom: renderer.domElement, camera, frame, field, player, vegetation, today, structures, build, grid, scene, atlas,
   pack: () => pack,
   pid: () => pid,
   structuresBase: () => structuresBase,
@@ -189,6 +191,7 @@ async function signIn() {
  * untouched — an edit never reaches them.
  */
 function rebuild(edits: Feature[], changes: StructureChange[]) {
+  let replant = false;
   if (pack) {
     pack = applyEdits(pack, edits);
     // the ground first: if it has been reshaped, the rings are sampled again and the hillside replanted
@@ -196,8 +199,7 @@ function rebuild(edits: Feature[], changes: StructureChange[]) {
     field.setShapings(pack.terrain.features.map(f => shapingFrom(f, (lng, lat) => field.raw(lng, lat))).filter((x): x is Shaping => !!x));
     if (field.shapingGen !== gen) {
       terrain.reshape();
-      const p = player.position;
-      vegetation.build(p.x, p.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity, exclude: packRing() });
+      replant = true;
       grid.visible = grid.visible;                // forgets its centre, so it is rebuilt on the next frame
     }
   }
@@ -206,12 +208,20 @@ function rebuild(edits: Feature[], changes: StructureChange[]) {
   player.solids = solidsFrom(structures.list, frame, field, pid);
   if (pack) {
     today.build(pack, tiles);
-    player.solids = player.solids.concat(today.solids);
+    const was = `${build.solids.length}:${build.platforms.length}:${build.counts.roofs}`;
+    build.build(pack);
+    if (`${build.solids.length}:${build.platforms.length}:${build.counts.roofs}` !== was) replant = true;   // nothing grows through a new floor
+    player.solids = player.solids.concat(today.solids, build.solids);
+    player.platforms = build.platforms;
     vegetation.buildRecords(pack.trees.map(t => {
       const w = frame.toWorld(t.lng, t.lat);
       return { x: w.x, z: w.z, height: t.height, crown: t.crown };
     }));
     hud.setPack(packLine(pack));
+  }
+  if (replant) {
+    const p = player.position;
+    vegetation.build(p.x, p.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity, exclude: packRing() });
   }
 }
 
@@ -253,6 +263,9 @@ function keepOut() {
       }),
       pad: 3.5
     }));
+  // nothing grows through a floor or a wall
+  for (const f of build.platforms) out.push({ ring: f.ring, pad: 1.5 });
+  for (const s of build.solids) out.push({ ring: s.ring, pad: 1 });
   const p = frame.toWorld(start.lng, start.lat);
   const r = 7;
   out.push({
@@ -316,8 +329,10 @@ async function boot() {
     ]);
     tiles = { asphalt, asphaltMetres: pack.materials?.asphalt?.metres };
     today.build(pack, tiles);
+    build.build(pack);
     if (grain) terrain.setGrain(grain);
-    player.solids = player.solids.concat(today.solids);
+    player.solids = player.solids.concat(today.solids, build.solids);
+    player.platforms = build.platforms;
     // the record's trees, at their own positions; the rule keeps out of the pack's ground
     vegetation.buildRecords(pack.trees.map(t => {
       const w = frame.toWorld(t.lng, t.lat);
@@ -391,13 +406,14 @@ function packLine(p: PackData): string {
   if (today.counts.buildings) bits.push(`${today.counts.buildings} standing`);
   if (p.notes.features.length || p.lines.features.length || p.zones.features.length) bits.push(`${p.notes.features.length + p.lines.features.length + p.zones.features.length} marked`);
   if (p.terrain.features.length) bits.push(`ground shaped ×${p.terrain.features.length}`);
+  if (p.build.features.length) bits.push(`${build.counts.walls + build.counts.floors + build.counts.roofs} built`);
   if (p.imagery) bits.push(`aerial ${p.imagery.captured ?? ''}`.trim());
   return `${p.manifest.name} · ${bits.join(' · ')}`;
 }
 
 // a small surface for tests and for the Playground shell to drive
 const api = {
-  player, frame, field, terrain, vegetation, structures, today, sky, scene, camera, renderer, stick, editor, grid, inspect, magic,
+  THREE, player, frame, field, terrain, vegetation, structures, today, build, sky, scene, camera, renderer, stick, editor, grid, inspect, magic,
   get ready() { return ready; },
   get pack() { return pack; },
   get session() { return session; },

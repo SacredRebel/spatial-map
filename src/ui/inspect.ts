@@ -71,6 +71,12 @@ export class Inspect {
         return `<b>${esc(f?.properties.name ?? p.id)}</b><span class="in-kind">${esc(f?.properties.kind ?? 'line')}</span>`;
       }
       case 'tree': return `<b>oak</b><span class="in-kind">${p.tree.height.toFixed(1)} m tall · crown ${p.tree.crown.toFixed(1)} m · from the 2018 lidar</span>`;
+      case 'build': {
+        const pr = p.feature.properties;
+        const parts = pr.structure ? this.editor.buildParts(String(pr.structure)).length : 0;
+        return `<b>${esc(pr.structure ? `${pr.structure} · ${pr.kind}` : pr.kind)}</b><span class="in-kind">${esc(this.editor.describeBuild(p.feature))}${parts > 1 ? ` · one of ${parts} parts` : ''} · built by the owner${pr.reported ? `, ${esc(pr.reported)}` : ''}</span>`;
+      }
+      case 'zone': return `<b>${esc(p.name)}</b><span class="in-kind">territory</span>`;
       default: return '';
     }
   }

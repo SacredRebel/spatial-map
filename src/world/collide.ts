@@ -45,6 +45,9 @@ export function solidsFrom(list: Structure[], frame: Frame, field: HeightField, 
   return out;
 }
 
+/** is a point in plan inside a ring */
+export function inRing(x: number, z: number, ring: { x: number; z: number }[]): boolean { return inside(x, z, ring); }
+
 function inside(x: number, z: number, ring: { x: number; z: number }[]): boolean {
   let hit = false;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {

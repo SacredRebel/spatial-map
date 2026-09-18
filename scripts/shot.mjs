@@ -45,12 +45,12 @@ if (view === 'magic') {
     w.editor.openMagic(id);
   });
 }
-if (view === 'fly' || view === 'edit' || view === 'place' || view === 'ground') {
+if (view === 'fly' || view === 'edit' || view === 'place' || view === 'ground' || view === 'build' || view === 'inside') {
   await page.evaluate(mode => {
     const w = window.world, p = w.player;
     p.setMode('fly');
-    p.key(' ', true); for (let i = 0; i < (mode === 'place' ? 2 : mode === 'ground' ? 3 : 4); i++) p.update(1); p.key(' ', false);   // up: update caps a step at a second
-    p.look(0, mode === 'place' ? 0.75 : mode === 'ground' ? 0.7 : 0.55);
+    if (mode !== 'inside') { p.key(' ', true); for (let i = 0; i < (mode === 'place' ? 2 : mode === 'ground' ? 3 : mode === 'build' ? 3 : 4); i++) p.update(1); p.key(' ', false); }   // up: update caps a step at a second
+    p.look(0, mode === 'place' ? 0.75 : mode === 'ground' ? 0.7 : mode === 'build' ? 0.72 : mode === 'inside' ? 0.1 : 0.55);
     if (mode !== 'fly' && w.pack) {
       const s = w.state();
       const MX = 111320 * Math.cos(s.lat * Math.PI / 180), MY = 110574;
@@ -70,6 +70,28 @@ if (view === 'fly' || view === 'edit' || view === 'place' || view === 'ground') 
         const id = w.editor.addBlock(...off(0, 19), { name: 'the new house', w: 14, d: 9, h: 4.5 }, s.headingDeg);
         w.editor.setTool('terrain');
         void id;
+      } else if (mode === 'build' || mode === 'inside') {
+        // the pad flattened, then a house built part by part: a room, a curved adobe wing with windows, a deck
+        w.editor.removeTreesAround(...off(2, 18), 24);
+        w.editor.addShaping([off(-16, 6), off(16, 6), off(16, 30), off(-16, 30)], 'flatten', 0, 4);
+        const wall = w.editor.addRoom(...off(0, 18), { name: 'the main house', w: 9, d: 6, h: 2.9, wall: 'lime', floor: 'wood', roof: 'gable', roofMaterial: 'tile', door: true }, s.headingDeg);
+        w.editor.addOpening(wall, 2, { kind: 'window', width: 1.6, sill: 0.9, head: 2.2 });
+        w.editor.addOpening(wall, 6.5, { kind: 'window', width: 1.6, sill: 0.9, head: 2.2 });
+        w.editor.addOpening(wall, 12, { kind: 'window', width: 2.4, sill: 0.8, head: 2.3 });
+        const wing = w.editor.addWall([off(6.5, 20), off(10.5, 21.5), off(14, 19), off(15, 15), off(12.5, 12)], { height: 2.6, thick: 0.35, material: 'adobe', smooth: true, base: 0, structure: 'the main house' });
+        w.editor.addOpening(wing, 5, { kind: 'window', width: 1.2, sill: 0.9, head: 2.1 });
+        w.editor.addOpening(wing, 9.5, { kind: 'door', width: 1, sill: 0, head: 2.1 });
+        w.editor.addRoof([off(6.5, 12), off(15.5, 12), off(15.5, 22), off(6.5, 22)], { form: 'vault', eaves: 2.6, pitch: 30, overhang: 0.4, material: 'metal', structure: 'the main house' });
+        w.editor.addFloor([off(-4.5, 6), off(4.5, 6), off(4.5, 12), off(-4.5, 12)], { level: 0, thick: 0.3, material: 'timber', structure: 'the deck' });
+        w.editor.setTool(mode === 'inside' ? 'select' : 'wall');
+        if (mode === 'inside') {
+          // stand a step in from the middle of the back wall, looking at the door and the windows in the front
+          const c = w.editor.buildFeature(wall).geometry.coordinates;
+          const mid = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+          const back = mid(c[2], c[3], 0.5), centre = mid(mid(c[0], c[2], 0.5), mid(c[1], c[3], 0.5), 0.5);
+          const stand = mid(back, centre, 0.3);
+          p.setMode('walk'); w.goto(stand[0], stand[1], s.headingDeg + 180); for (let i = 0; i < 3; i++) p.update(0.5); p.setView('first'); w.editor.setActive(false);
+        }
       } else {
         w.editor.setTool('block');
         const id = w.editor.addBlock(...off(0, 14), { name: 'the new house', w: 14, d: 9, h: 4.5 }, s.headingDeg);

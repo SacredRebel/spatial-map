@@ -21,7 +21,8 @@ import * as THREE from 'three';
 import type { Frame } from '../world/geo';
 import type { HeightField } from '../world/heightfield';
 import type { Solid } from '../world/collide';
-import { resolve } from '../world/collide';
+import { resolve, inRing } from '../world/collide';
+import type { Platform } from '../world/build';
 import type { AvatarRig } from './avatar';
 import { CapsuleRig } from './avatar';
 
@@ -31,6 +32,7 @@ const LOOK = 0.0022, TOUCH_LOOK = 0.006;
 const PITCH_MIN = -1.15, PITCH_MAX = 0.9;
 const FLY_PITCH = 1.5, FLY_SPEED = 12, FLY_MIN = 2, FLY_MAX = 120, FLY_FAST = 4;
 const SUBSTEP = 1 / 20;            // the physics runs at 20 Hz however fast the page draws
+const STEP_UP = 0.55;              // a slab, a step, a deck edge: taken in stride; anything higher wants stairs
 
 export type View = 'third' | 'first';
 export type Mode = 'walk' | 'fly';
@@ -60,6 +62,8 @@ export class Player {
   editing = false;
   /** buildings that stop you; set by main once the registry has loaded */
   solids: Solid[] = [];
+  /** floors and decks you stand on: a ring and its top, taken when it is no more than a step up */
+  platforms: Platform[] = [];
   private pos = new THREE.Vector3();
   private vel = new THREE.Vector3();
   private yaw = 0;
@@ -312,6 +316,10 @@ export class Player {
 
     const ll = this.frame.toLngLat(this.pos.x, this.pos.z);
     this.ground = this.field.atOr(ll.lng, ll.lat, this.ground);
+    // a floor under the feet, or no more than a step up, is the ground now; one far above is a ceiling, not a floor
+    for (const f of this.platforms) {
+      if (f.top > this.ground && f.top <= this.pos.y + STEP_UP && inRing(this.pos.x, this.pos.z, f.ring)) this.ground = f.top;
+    }
 
     if (this.keys.has(' ') && this.grounded) { this.vel.y = JUMP; this.grounded = false; }
     this.vel.y += GRAVITY * d;

@@ -15,6 +15,12 @@
 //   Picking: trees are instanced meshes, so a hit gives an instance id and the vegetation keeps
 //   the index back to the record; the ground is not raycast against the mesh at all but marched
 //   along the ray against the height function, which is exact and costs nothing.
+//
+//   Construction (v0.9): walls, floors and roofs are parts — each one a feature of the build layer
+//   — drawn on the metre grid, snapped to the half metre and to the ends of other walls, cut
+//   through with doors and windows, moved and turned like blocks, changed in place (a later
+//   feature with the same id replaces the earlier one), and taken down. A room is a floor, a
+//   closed wall with a door, and a roof, put down in one go.
 
 import * as THREE from 'three';
 import type { Frame } from '../world/geo';
@@ -24,13 +30,19 @@ import type { Today } from '../world/today';
 import type { Player } from '../player/player';
 import type { Feature, PackData, PackTree } from '../world/pack';
 import { mergeChanges, type Structures, type Structure, type StructureChange } from '../world/structures';
+import { Along, wallLine, MATERIALS, type Build, type Opening, type RoofForm } from '../world/build';
 import type { Caps } from '../world/roles';
 import type { GroundGrid } from './grid';
 
-export type Tool = 'select' | 'marker' | 'tree' | 'fence' | 'path' | 'road' | 'block' | 'magic' | 'zone' | 'terrain';
+export type Tool = 'select' | 'marker' | 'tree' | 'fence' | 'path' | 'road' | 'block' | 'magic' | 'zone' | 'terrain' | 'wall' | 'floor' | 'roof' | 'opening';
 
 export interface ShapeSpec { op: 'flatten' | 'raise' | 'lower'; height: number; edge: number }
 export interface ZoneSpec { name: string; kind: string }
+export interface WallSpec { height: number; thick: number; material: string; smooth: boolean; base: number; structure: string }
+export interface FloorSpec { level: number; thick: number; material: string; structure: string }
+export interface RoofSpec { form: RoofForm; eaves: number; pitch: number; overhang: number; material: string; structure: string }
+export interface OpeningSpec { kind: 'door' | 'window'; width: number; sill: number; head: number }
+export interface RoomSpec { name: string; w: number; d: number; h: number; wall: string; floor: string; roof: RoofForm; roofMaterial: string; door: boolean }
 
 export type Pick =
   | { kind: 'tree'; index: number; tree: PackTree; point: THREE.Vector3 }
@@ -40,6 +52,7 @@ export type Pick =
   | { kind: 'zone'; id: string; name: string; object: THREE.Object3D; point: THREE.Vector3 }
   | { kind: 'building'; name: string; object: THREE.Object3D; point: THREE.Vector3 }
   | { kind: 'structure'; id: string; structure: Structure; object: THREE.Object3D; point: THREE.Vector3 }
+  | { kind: 'build'; id: string; feature: Feature; object: THREE.Object3D; point: THREE.Vector3 }
   | { kind: 'ground'; point: THREE.Vector3; lng: number; lat: number };
 
 export interface BlockSpec { name: string; w: number; d: number; h: number }
@@ -53,6 +66,7 @@ export interface EditorOpts {
   vegetation: Vegetation;
   today: Today;
   structures: Structures;
+  build: Build;
   grid: GroundGrid;
   scene: THREE.Scene;
   /** the pack, once it has loaded; null before */
@@ -101,6 +115,12 @@ export class Editor {
   shape: ShapeSpec = { op: 'flatten', height: 1, edge: 3 };
   /** what the next drawn territory is */
   zone: ZoneSpec = { name: '', kind: 'zone' };
+  /** the next wall, floor, roof, opening and room */
+  wall: WallSpec = { height: 2.7, thick: 0.25, material: 'plaster', smooth: false, base: 0, structure: '' };
+  floor: FloorSpec = { level: 0, thick: 0.2, material: 'wood', structure: '' };
+  roof: RoofSpec = { form: 'gable', eaves: 2.7, pitch: 25, overhang: 0.5, material: 'tile', structure: '' };
+  opening: OpeningSpec = { kind: 'door', width: 0.9, sill: 0.9, head: 2.1 };
+  room: RoomSpec = { name: 'room', w: 6, d: 4, h: 2.7, wall: 'plaster', floor: 'wood', roof: 'gable', roofMaterial: 'tile', door: true };
   /** what the last save said, for the panel */
   lastSave: { ok: boolean; message: string; at: number } | null = null;
   private history: Snapshot[] = [];
@@ -112,7 +132,7 @@ export class Editor {
   private group = new THREE.Group();
   private counter = 0;
   private lastHover = 0;
-  private drag: { id: string; start: Structure; from: THREE.Vector3; moved: boolean } | null = null;
+  private drag: { id: string; kind: 'structure' | 'build'; start: Structure | Feature; from: THREE.Vector3; moved: boolean } | null = null;
 
   constructor(private o: EditorOpts) {
     this.group.name = 'editor';
@@ -142,8 +162,10 @@ export class Editor {
   restore() {
     const pack = this.o.pack();
     if (!pack) return;
-    const have = new Set(pack.edits.features.map(f => String(f.properties.id)));
-    const keep = (list: Feature[]) => list.filter(f => f && f.properties && !have.has(String(f.properties.id)));
+    // an edit the pack already holds, word for word, was saved meanwhile and is dropped; one with the
+    // same id and different words is a change to it, and stays
+    const have = new Map(pack.edits.features.map(f => [String(f.properties.id), JSON.stringify(f)]));
+    const keep = (list: Feature[]) => list.filter(f => f && f.properties && have.get(String(f.properties.id)) !== JSON.stringify(f));
     try {
       const raw = localStorage.getItem(KEY(pack.manifest.id));
       const stored = raw ? JSON.parse(raw) : null;
@@ -202,7 +224,8 @@ export class Editor {
   /** each frame: the grid follows whoever is looking, or the thing they are holding */
   frame() {
     if (!this.active) return;
-    const p = this.selection && this.selection.kind === 'structure' ? this.centroid(this.selection.structure) : this.o.player.position;
+    const p = this.selection && this.selection.kind === 'structure' ? this.centroid(this.selection.structure)
+      : this.selection && this.selection.kind === 'build' ? this.buildCentre(this.selection.feature) : this.o.player.position;
     if (p) this.o.grid.update(p.x, p.z);
   }
 
@@ -245,7 +268,7 @@ export class Editor {
   pick(clientX: number, clientY: number): Pick | null {
     const pack = this.o.pack();
     const ray = this.rayAt(clientX, clientY);
-    const targets: THREE.Object3D[] = [...this.o.vegetation.recordMeshes, this.o.today.group, this.o.structures.group];
+    const targets: THREE.Object3D[] = [...this.o.vegetation.recordMeshes, this.o.today.group, this.o.structures.group, this.o.build.group];
     const hits = ray.intersectObjects(targets, true);
     const groundPoint = this.ground(ray.ray);
     const groundDist = groundPoint ? groundPoint.distanceTo(ray.ray.origin) : Infinity;
@@ -267,6 +290,7 @@ export class Editor {
       if (type === 'line') return { kind: 'line', id, object: o, point: hit.point };
       if (type === 'zone') return { kind: 'zone', id, name: this.zoneName(id), object: o, point: hit.point };
       if (type === 'today') return { kind: 'building', name: id, object: o, point: hit.point };
+      if (type === 'build') { const f = this.buildFeature(id); if (f) return { kind: 'build', id, feature: f, object: o, point: hit.point }; continue; }
       if (type === 'massing' || type === 'model' || type === 'plan' || type === 'site') {
         const s = this.structure(id);
         if (s) return { kind: 'structure', id, structure: s, object: o, point: hit.point };
@@ -366,7 +390,51 @@ export class Editor {
       this.box.setFromObject(shown.object);
       this.box.visible = true;
       if (shown.kind === 'structure') this.showDims(shown.structure);
+      if (shown.kind === 'build') this.showBuildDims(shown.feature, shown.object);
     }
+  }
+
+  private showBuildDims(f: Feature, obj: THREE.Object3D) {
+    const c = this.buildCentre(f);
+    if (!c) return;
+    const box = new THREE.Box3().setFromObject(obj);
+    this.showLabel(this.describeBuild(f), c.x, box.max.y + 1.2, c.z);
+  }
+
+  /** one line for a part: what it is and how big */
+  describeBuild(f: Feature): string {
+    const p = f.properties;
+    const kind = String(p.kind);
+    const name = p.structure ? `${p.structure} · ` : '';
+    if (kind === 'wall') {
+      const L = this.wallAlong(f)?.total ?? 0;
+      const n = Array.isArray(p.openings) ? p.openings.length : 0;
+      return `${name}wall ${L.toFixed(1)} m long · ${Number(p.height_m || 2.7).toFixed(1)} m high · ${Number(p.thick_m || 0.25).toFixed(2)} m ${p.material || 'plaster'}${p.smooth ? ' · curved' : ''}${n ? ` · ${n} opening${n === 1 ? '' : 's'}` : ''}`;
+    }
+    const area = this.ringArea(f);
+    if (kind === 'floor') return `${name}floor ${area.toFixed(0)} m² (${Math.round(area / (FT * FT))} sq ft) · ${p.material || 'wood'}${Number(p.level_m) ? ` · ${Number(p.level_m).toFixed(1)} m up` : ''}`;
+    if (kind === 'roof') return `${name}${p.form || 'gable'} roof ${area.toFixed(0)} m² · eaves ${Number(p.eaves_m || 3).toFixed(1)} m · ${Number(p.pitch_deg ?? 25)}° · ${p.material || 'tile'}`;
+    return `${name}${kind}`;
+  }
+
+  private ringArea(f: Feature): number {
+    if (f.geometry.type !== 'Polygon') return 0;
+    const ring = this.ring(f.geometry.coordinates[0] || []);
+    let a = 0;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) a += (ring[j].x + ring[i].x) * (ring[j].z - ring[i].z);
+    return Math.abs(a / 2);
+  }
+
+  private showLabel(text: string, x: number, y: number, z: number) {
+    const tex = this.labelTexture(text);
+    const old = this.dims.material.map;
+    this.dims.material.map = tex;
+    this.dims.material.needsUpdate = true;
+    old?.dispose();
+    const w = Math.min(26, Math.max(6, text.length * 0.42));
+    this.dims.scale.set(w, w / 8, 1);
+    this.dims.position.set(x, y, z);
+    this.dims.visible = true;
   }
 
   private showDims(s: Structure) {
@@ -377,19 +445,12 @@ export class Editor {
     const text = s.status === 'model'
       ? `${s.name} · model${s.rotationDeg ? ` · ${s.rotationDeg}°` : ''}${s.altitudeM ? ` · ${s.altitudeM > 0 ? '+' : ''}${s.altitudeM.toFixed(2)} m` : ''}`
       : `${w.toFixed(1)} × ${d.toFixed(1)} m  (${ft(w)} × ${ft(d)} ft)${h ? ` · ${h.toFixed(1)} m high` : ''}`;
-    const tex = this.labelTexture(text);
-    const old = this.dims.material.map;
-    this.dims.material.map = tex;
-    this.dims.material.needsUpdate = true;
-    old?.dispose();
-    this.dims.scale.set(Math.max(6, text.length * 0.42), 1.5, 1);
-    this.dims.position.set(c.x, c.y + h + 2.2, c.z);
-    this.dims.visible = true;
+    this.showLabel(text, c.x, c.y + h + 2.2, c.z);
   }
 
   private labelTexture(text: string): THREE.CanvasTexture {
     const c = document.createElement('canvas');
-    c.width = 768; c.height = 96;
+    c.width = 1024; c.height = 96;
     const g = c.getContext('2d')!;
     g.fillStyle = 'rgba(12,16,14,0.85)';
     g.beginPath(); g.roundRect(0, 0, c.width, c.height, 22); g.fill();
@@ -397,7 +458,10 @@ export class Editor {
     g.fillStyle = '#f2efe6';
     g.font = '600 40px -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif';
     g.textAlign = 'center'; g.textBaseline = 'middle';
-    g.fillText(text, c.width / 2, c.height / 2);
+    let t = text;
+    while (t.length > 3 && g.measureText(t).width > c.width - 40) t = t.slice(0, -2);
+    if (t !== text) t = t.replace(/\s+\S*$/, '') + '…';
+    g.fillText(t, c.width / 2, c.height / 2);
     const tex = new THREE.CanvasTexture(c);
     tex.colorSpace = THREE.SRGBColorSpace;
     return tex;
@@ -425,16 +489,24 @@ export class Editor {
     d.addEventListener('pointerdown', e => {
       if (!this.active || e.button !== 0 || this.tool !== 'select' || this.moving || !this.o.caps().place) return;
       const p = this.pick(e.clientX, e.clientY);
-      if (p && p.kind === 'structure') {
+      if (p && (p.kind === 'structure' || p.kind === 'build')) {
         const g = this.ground(this.rayAt(e.clientX, e.clientY).ray);
-        if (g) { this.drag = { id: p.id, start: JSON.parse(JSON.stringify(p.structure)), from: g, moved: false }; d.setPointerCapture?.(e.pointerId); }
+        if (g) {
+          // the one history step for the whole move is taken now; a click that never moves gives it back
+          this.snapshot();
+          this.drag = { id: p.id, kind: p.kind, start: JSON.parse(JSON.stringify(p.kind === 'structure' ? p.structure : p.feature)), from: g, moved: false };
+          d.setPointerCapture?.(e.pointerId);
+        }
       }
     });
     d.addEventListener('pointerup', () => {
       if (!this.drag) return;
       const was = this.drag;
       this.drag = null;
-      if (was.moved) { this.snapshot(); this.selectStructure(was.id); this.persist(); this.o.onChange(this); }
+      if (!was.moved) { this.history.pop(); return; }
+      if (was.kind === 'structure') this.selectStructure(was.id); else this.selectBuild(was.id);
+      this.persist();
+      this.o.onChange(this);
     });
     d.addEventListener('click', e => {
       if (!this.active || e.button !== 0) return;
@@ -455,6 +527,12 @@ export class Editor {
       else if (k === 'v') this.toggleGrid();
       else if (k === '[' && this.selection?.kind === 'structure') this.rotateStructure(this.selection.id, -SNAP_DEG);
       else if (k === ']' && this.selection?.kind === 'structure') this.rotateStructure(this.selection.id, SNAP_DEG);
+      else if (k === '[' && this.selection?.kind === 'build') this.rotateBuild(this.selection.id, -SNAP_DEG);
+      else if (k === ']' && this.selection?.kind === 'build') this.rotateBuild(this.selection.id, SNAP_DEG);
+      else if (k === 'l') this.setTool('wall');
+      else if (k === 'f') this.setTool('floor');
+      else if (k === 'r') this.setTool('roof');
+      else if (k === 'o') this.setTool('opening');
       else if ((k === '+' || k === '=') && this.selection?.kind === 'structure') this.raiseStructure(this.selection.id, 0.25);
       else if ((k === '-' || k === '_') && this.selection?.kind === 'structure') this.raiseStructure(this.selection.id, -0.25);
       else if (k === '1') this.setTool('select');
@@ -487,7 +565,46 @@ export class Editor {
       case 'fence': case 'path': case 'road': case 'zone': case 'terrain':
         if (p.kind === 'ground') { this.drawing.push([p.lng, p.lat]); this.previewLine(null); this.o.onChange(this); }
         break;
+      case 'wall': case 'floor': case 'roof': {
+        // construction draws on the grid: the point snaps to the half metre, and to the end of a wall near it
+        if (!this.o.caps().place) break;
+        const at = p.kind === 'ground' ? p.point : p.kind === 'build' || p.kind === 'structure' || p.kind === 'building' ? p.point : null;
+        if (!at) break;
+        const s = this.snapPoint(at.x, at.z);
+        // a wall that comes back to its own start closes, and is finished
+        if (this.tool === 'wall' && this.drawing.length >= 3) {
+          const w0 = this.o.frame.toWorld(this.drawing[0][0], this.drawing[0][1]);
+          if (Math.hypot(w0.x - s.x, w0.z - s.z) < 0.3) { this.drawing.push(this.drawing[0]); this.finishLine(); break; }
+        }
+        this.drawing.push(s.ll);
+        this.previewLine(null);
+        this.o.onChange(this);
+        break;
+      }
+      case 'opening':
+        if (p.kind === 'build' && p.feature.properties.kind === 'wall' && this.o.caps().place) {
+          const at = this.wallDistance(p.feature, p.point);
+          if (at != null) this.addOpening(p.id, Math.round(at * 2) / 2, this.opening);
+        }
+        break;
     }
+  }
+
+  /** a world point snapped to the half metre, or to the end of a wall within reach; back as lng/lat too */
+  private snapPoint(x: number, z: number): { x: number; z: number; ll: [number, number] } {
+    let sx = Math.round(x / SNAP_M) * SNAP_M, sz = Math.round(z / SNAP_M) * SNAP_M;
+    let best = 0.6;
+    for (const f of this.o.pack()?.build.features ?? []) {
+      if (f.properties.kind !== 'wall' || f.geometry.type !== 'LineString') continue;
+      const c = f.geometry.coordinates;
+      for (const [lng, lat] of [c[0], c[c.length - 1]]) {
+        const w = this.o.frame.toWorld(lng, lat);
+        const d = Math.hypot(w.x - x, w.z - z);
+        if (d < best) { best = d; sx = w.x; sz = w.z; }
+      }
+    }
+    const ll = this.o.frame.toLngLat(sx, sz);
+    return { x: sx, z: sz, ll: [ll.lng, ll.lat] };
   }
 
   // ---- history ---------------------------------------------------------------------------------------
@@ -614,6 +731,7 @@ export class Editor {
       if (next.length !== before) { this.snapshot(); this.edits = next; this.persist(); this.redraw(); this.select(null); this.setHover(null); this.o.onChange(this); }
     }
     else if (p.kind === 'structure') this.removeStructure(p.id);
+    else if (p.kind === 'build') this.removeBuild(p.id);
   }
 
   private promptNote(lng: number, lat: number) {
@@ -627,7 +745,7 @@ export class Editor {
   }
 
   /** the tool draws a ring rather than a line */
-  private get polygonal(): boolean { return this.tool === 'zone' || this.tool === 'terrain'; }
+  private get polygonal(): boolean { return this.tool === 'zone' || this.tool === 'terrain' || this.tool === 'floor' || this.tool === 'roof'; }
 
   private previewLine(cursor: THREE.Vector3 | null) {
     const pts = this.drawing.map(([lng, lat]) => {
@@ -650,10 +768,19 @@ export class Editor {
       if (this.tool === 'zone') {
         const name = (this.o.ask?.('Name this territory', this.zone.name || this.zone.kind) ?? window.prompt('Name this territory', this.zone.name || this.zone.kind))?.trim() || this.zone.kind;
         this.addZone(coords, name, this.zone.kind);
-      } else this.addShaping(coords, this.shape.op, this.shape.height, this.shape.edge);
+      } else if (this.tool === 'floor') this.addFloor(coords, this.floor);
+      else if (this.tool === 'roof') this.addRoof(coords, this.roof);
+      else this.addShaping(coords, this.shape.op, this.shape.height, this.shape.edge);
       return;
     }
     if (this.drawing.length < 2) return;
+    if (this.tool === 'wall') {
+      const coords = this.drawing.slice();
+      this.drawing = [];
+      this.preview.visible = false;
+      this.addWall(coords, this.wall);
+      return;
+    }
     const kind = (this.tool === 'fence' || this.tool === 'path' || this.tool === 'road') ? this.tool : 'fence';
     const name = (this.o.ask?.(`Name this ${kind}`, kind) ?? window.prompt(`Name this ${kind}`, kind))?.trim() || kind;
     const coords = this.drawing.slice();
@@ -686,7 +813,7 @@ export class Editor {
     const w = Math.max(0.5, spec.w), d = Math.max(0.5, spec.d), h = Math.max(0.5, spec.h);
     const c = this.o.frame.toWorld(lng, lat);
     const cs = new THREE.Vector3(Math.round(c.x / SNAP_M) * SNAP_M, 0, Math.round(c.z / SNAP_M) * SNAP_M);
-    const a = -headingDeg * Math.PI / 180;      // world x is east, z is south; a heading turns clockwise from north
+    const a = headingDeg * Math.PI / 180;       // world x is east, z is south; a heading turns clockwise from north, seen from above
     const corners = [[-w / 2, -d / 2], [w / 2, -d / 2], [w / 2, d / 2], [-w / 2, d / 2]].map(([x, z]) =>
       new THREE.Vector3(cs.x + x * Math.cos(a) - z * Math.sin(a), 0, cs.z + x * Math.sin(a) + z * Math.cos(a)));
     const id = `b-${Date.now().toString(36)}-${(this.counter++).toString(36)}`;
@@ -786,8 +913,17 @@ export class Editor {
     const dx = g.x - this.drag.from.x, dz = g.z - this.drag.from.z;
     if (!this.drag.moved && Math.hypot(dx, dz) < 0.25) return;
     this.drag.moved = true;
+    if (this.drag.kind === 'build') {
+      // from where it started, not from the last frame, so the snap never walks; drawn live, no history entry per frame
+      const next = this.shifted(this.drag.start as Feature, dx, dz, true);
+      const at = this.edits.findIndex(x => String(x.properties.id) === String(next.properties.id) && x.properties.op === 'add');
+      if (at >= 0) this.edits[at] = next; else this.edits.push(next);
+      this.redraw();
+      this.selectBuild(this.drag.id);
+      return;
+    }
     // move from the start, not from the last frame, so the snap never walks
-    const start = this.drag.start;
+    const start = this.drag.start as Structure;
     const row: StructureChange = JSON.parse(JSON.stringify(start));
     if (row.outline) {
       const ring = this.ring(row.outline);
@@ -805,6 +941,264 @@ export class Editor {
     this.structures = this.structures.filter(s => s.id !== row.id).concat([row]);
     this.redraw();
     this.selectStructure(row.id);
+  }
+
+  // ---- construction: walls, floors, roofs ---------------------------------------------------------
+  /** a part as it now stands — the pack after every edit has been applied */
+  buildFeature(id: string): Feature | null {
+    return this.o.pack()?.build.features.find(f => String(f.properties.id) === id) ?? null;
+  }
+
+  /** every part that belongs to a named structure */
+  buildParts(structure: string): Feature[] {
+    return (this.o.pack()?.build.features ?? []).filter(f => f.properties.structure === structure);
+  }
+
+  private wallAlong(f: Feature): Along | null {
+    if (f.geometry.type !== 'LineString') return null;
+    const line = wallLine(f.geometry.coordinates, !!f.properties.smooth, this.o.frame);
+    return line.length >= 2 ? new Along(line) : null;
+  }
+
+  /** how far along a wall a world point is — where a click on it lands */
+  wallDistance(f: Feature, point: THREE.Vector3): number | null {
+    const along = this.wallAlong(f);
+    if (!along) return null;
+    let best = Infinity, at = 0;
+    for (let i = 0; i < along.pts.length - 1; i++) {
+      const a = along.pts[i], b = along.pts[i + 1];
+      const dx = b.x - a.x, dz = b.z - a.z, l2 = dx * dx + dz * dz;
+      const t = l2 > 0 ? Math.max(0, Math.min(1, ((point.x - a.x) * dx + (point.z - a.z) * dz) / l2)) : 0;
+      const d = Math.hypot(point.x - (a.x + t * dx), point.z - (a.z + t * dz));
+      if (d < best) { best = d; at = along.cum[i] + t * Math.sqrt(l2); }
+    }
+    return at;
+  }
+
+  /** the middle of a part, on the ground */
+  buildCentre(f: Feature): THREE.Vector3 | null {
+    const coords = f.geometry.type === 'LineString' ? f.geometry.coordinates : f.geometry.type === 'Polygon' ? (f.geometry.coordinates[0] || []) : [f.geometry.coordinates];
+    if (!coords.length) return null;
+    const pts = this.ring(coords);
+    const c = pts.reduce((a, p) => a.add(p), new THREE.Vector3()).multiplyScalar(1 / pts.length);
+    const ll = this.o.frame.toLngLat(c.x, c.z);
+    c.y = this.o.field.atOr(ll.lng, ll.lat, 0);
+    return c;
+  }
+
+  private material(name: string, fallback: string): string { return MATERIALS[name] ? name : fallback; }
+
+  /** a wall along a line of points, of a height and a thickness; `smooth` bends it into a curve through them */
+  addWall(coords: [number, number][], spec: WallSpec): string | null {
+    if (coords.length < 2) return null;
+    const props: Record<string, unknown> = {
+      op: 'add', layer: 'build', kind: 'wall',
+      height_m: Math.min(12, Math.max(0.3, spec.height)), thick_m: Math.min(1.5, Math.max(0.05, spec.thick)),
+      material: this.material(spec.material, 'plaster'), openings: []
+    };
+    if (spec.smooth) props.smooth = true;
+    if (spec.base) props.base_m = Math.min(30, Math.max(-5, spec.base));
+    if (spec.structure.trim()) props.structure = spec.structure.trim().slice(0, 60);
+    const f: Feature = { type: 'Feature', properties: this.stamp(props), geometry: { type: 'LineString', coordinates: coords.map(c => [c[0], c[1]]) } };
+    this.commitBuild([f]);
+    return String(f.properties.id);
+  }
+
+  /** a floor over a ring, at a level above the ground, of a thickness; you stand on it */
+  addFloor(coords: [number, number][], spec: FloorSpec): string | null {
+    if (coords.length < 3) return null;
+    const ring = coords.slice(); ring.push(ring[0]);
+    const props: Record<string, unknown> = { op: 'add', layer: 'build', kind: 'floor', level_m: Math.min(30, Math.max(-5, spec.level)), thick_m: Math.min(1, Math.max(0.05, spec.thick)), material: this.material(spec.material, 'wood') };
+    if (spec.structure.trim()) props.structure = spec.structure.trim().slice(0, 60);
+    const f: Feature = { type: 'Feature', properties: this.stamp(props), geometry: { type: 'Polygon', coordinates: [ring] } };
+    this.commitBuild([f]);
+    return String(f.properties.id);
+  }
+
+  /** a roof over a ring: its form, the height of its eaves, its pitch, how far it overhangs */
+  addRoof(coords: [number, number][], spec: RoofSpec, ridgeDeg?: number): string | null {
+    if (coords.length < 3) return null;
+    const ring = coords.slice(); ring.push(ring[0]);
+    const props: Record<string, unknown> = {
+      op: 'add', layer: 'build', kind: 'roof', form: spec.form, eaves_m: Math.min(30, Math.max(0.5, spec.eaves)),
+      pitch_deg: Math.min(60, Math.max(0, spec.pitch)), overhang_m: Math.min(3, Math.max(0, spec.overhang)), material: this.material(spec.material, 'tile')
+    };
+    if (ridgeDeg != null && isFinite(ridgeDeg)) props.ridge_deg = ((ridgeDeg % 360) + 360) % 360;
+    if (spec.structure.trim()) props.structure = spec.structure.trim().slice(0, 60);
+    const f: Feature = { type: 'Feature', properties: this.stamp(props), geometry: { type: 'Polygon', coordinates: [ring] } };
+    this.commitBuild([f]);
+    return String(f.properties.id);
+  }
+
+  /**
+   * A room in one go — a floor, a closed wall round it with a door in the first side, and a roof —
+   * so many metres by so many, so high, facing a heading, on the half-metre grid. One undo step.
+   */
+  addRoom(lng: number, lat: number, spec: RoomSpec, headingDeg = 0): string | null {
+    const w = Math.max(1, spec.w), d = Math.max(1, spec.d), h = Math.min(12, Math.max(1, spec.h));
+    const c = this.o.frame.toWorld(lng, lat);
+    const cs = { x: Math.round(c.x / SNAP_M) * SNAP_M, z: Math.round(c.z / SNAP_M) * SNAP_M };
+    const a = headingDeg * Math.PI / 180;
+    const corners = [[-w / 2, d / 2], [w / 2, d / 2], [w / 2, -d / 2], [-w / 2, -d / 2]].map(([x, z]) =>
+      new THREE.Vector3(cs.x + x * Math.cos(a) - z * Math.sin(a), 0, cs.z + x * Math.sin(a) + z * Math.cos(a)));
+    const ring = this.outlineFrom(corners);            // closed: five points, the first side faces the heading
+    const name = spec.name.trim().slice(0, 60) || 'room';
+    const floor: Feature = { type: 'Feature', properties: this.stamp({ op: 'add', layer: 'build', kind: 'floor', level_m: 0, thick_m: 0.2, material: this.material(spec.floor, 'wood'), structure: name }), geometry: { type: 'Polygon', coordinates: [ring] } };
+    const openings: Opening[] = spec.door ? [{ kind: 'door', at_m: Math.round(w) / 2, width_m: 0.9, sill_m: 0, head_m: Math.min(2.1, h - 0.2) }] : [];
+    const wall: Feature = { type: 'Feature', properties: this.stamp({ op: 'add', layer: 'build', kind: 'wall', height_m: h, thick_m: 0.25, material: this.material(spec.wall, 'plaster'), base_m: 0.2, openings, structure: name }), geometry: { type: 'LineString', coordinates: ring } };
+    const ridge = ((headingDeg % 360) + 360 + (w >= d ? 90 : 0)) % 360;      // the ridge runs the long way
+    const roof: Feature = { type: 'Feature', properties: this.stamp({ op: 'add', layer: 'build', kind: 'roof', form: spec.roof, eaves_m: h + 0.2, pitch_deg: spec.roof === 'flat' ? 0 : 25, overhang_m: 0.5, material: this.material(spec.roofMaterial, 'tile'), ridge_deg: ridge, structure: name }), geometry: { type: 'Polygon', coordinates: [ring] } };
+    this.commitBuild([floor, wall, roof], String(wall.properties.id));
+    return String(wall.properties.id);
+  }
+
+  /** a room a few metres in front of where you stand, facing the way you face */
+  addRoomHere(spec: RoomSpec): string | null {
+    const st = this.o.player.state();
+    const a = st.headingDeg * Math.PI / 180;
+    const p = this.o.player.position;
+    const ahead = Math.max(2, spec.d / 2 + 2);
+    const ll = this.o.frame.toLngLat(p.x + Math.sin(a) * ahead, p.z - Math.cos(a) * ahead);
+    return this.addRoom(ll.lng, ll.lat, spec, st.headingDeg);
+  }
+
+  /** how the editor asks a question: the host's way, or the browser's */
+  ask(question: string, initial: string): string | null {
+    return this.o.ask ? this.o.ask(question, initial) : window.prompt(question, initial);
+  }
+
+  /** a door or a window cut into a wall, so far along it */
+  addOpening(wallId: string, at: number, spec: OpeningSpec): boolean {
+    const f = this.buildFeature(wallId);
+    if (!f || f.properties.kind !== 'wall') return false;
+    const next: Feature = JSON.parse(JSON.stringify(f));
+    const list = Array.isArray(next.properties.openings) ? next.properties.openings as Opening[] : [];
+    const o: Opening = spec.kind === 'door'
+      ? { kind: 'door', at_m: at, width_m: Math.min(6, Math.max(0.5, spec.width)), sill_m: 0, head_m: Math.min(Number(f.properties.height_m || 2.7) - 0.05, Math.max(1.5, spec.head)) }
+      : { kind: 'window', at_m: at, width_m: Math.min(10, Math.max(0.3, spec.width)), sill_m: Math.max(0.05, spec.sill), head_m: Math.min(Number(f.properties.height_m || 2.7) - 0.05, Math.max(spec.sill + 0.3, spec.head)) };
+    list.push(o);
+    next.properties.openings = list;
+    this.replaceBuild(next);
+    return true;
+  }
+
+  removeOpening(wallId: string, index: number) {
+    const f = this.buildFeature(wallId);
+    if (!f || !Array.isArray(f.properties.openings)) return;
+    const next: Feature = JSON.parse(JSON.stringify(f));
+    (next.properties.openings as Opening[]).splice(index, 1);
+    this.replaceBuild(next);
+  }
+
+  /** change a part's properties: its height, its material, whether it curves, its name */
+  updateBuild(id: string, patch: Record<string, unknown>) {
+    const f = this.buildFeature(id);
+    if (!f) return;
+    const next: Feature = JSON.parse(JSON.stringify(f));
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === undefined || v === '' || v === null) delete next.properties[k];
+      else next.properties[k] = v;
+    }
+    this.replaceBuild(next);
+  }
+
+  /** the middle of a set of points, a repeated closing point not counted twice */
+  private centreOf(pts: { x: number; z: number }[]): { x: number; z: number } {
+    const n = pts.length > 1 && Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].z - pts[pts.length - 1].z) < 1e-6 ? pts.length - 1 : pts.length;
+    let x = 0, z = 0;
+    for (let i = 0; i < n; i++) { x += pts[i].x / n; z += pts[i].z / n; }
+    return { x, z };
+  }
+
+  /** move a part by so many metres east and south, snapped to the half metre */
+  moveBuild(id: string, dx: number, dz: number, snap = true) {
+    const f = this.buildFeature(id);
+    if (!f) return;
+    this.replaceBuild(this.shifted(f, dx, dz, snap));
+  }
+
+  private shifted(f: Feature, dx: number, dz: number, snap: boolean): Feature {
+    const next: Feature = JSON.parse(JSON.stringify(f));
+    const coords = next.geometry.type === 'LineString' ? next.geometry.coordinates : next.geometry.type === 'Polygon' ? next.geometry.coordinates[0] : [next.geometry.coordinates];
+    const pts = coords.map(([lng, lat]) => this.o.frame.toWorld(lng, lat));
+    const c = this.centreOf(pts);
+    let tx = c.x + dx, tz = c.z + dz;
+    if (snap) { tx = Math.round(tx / SNAP_M) * SNAP_M; tz = Math.round(tz / SNAP_M) * SNAP_M; }
+    const ox = tx - c.x, oz = tz - c.z;
+    coords.forEach((q, i) => { const ll = this.o.frame.toLngLat(pts[i].x + ox, pts[i].z + oz); q[0] = ll.lng; q[1] = ll.lat; });
+    return next;
+  }
+
+  /** turn a part about its middle, in steps of fifteen degrees; a roof's ridge turns with it */
+  rotateBuild(id: string, deg: number) {
+    const f = this.buildFeature(id);
+    if (!f) return;
+    const next: Feature = JSON.parse(JSON.stringify(f));
+    const coords = next.geometry.type === 'LineString' ? next.geometry.coordinates : next.geometry.type === 'Polygon' ? next.geometry.coordinates[0] : [next.geometry.coordinates];
+    const pts = coords.map(([lng, lat]) => this.o.frame.toWorld(lng, lat));
+    const c = this.centreOf(pts);
+    const a = deg * Math.PI / 180;
+    coords.forEach((q, i) => {
+      const x = pts[i].x - c.x, z = pts[i].z - c.z;
+      const ll = this.o.frame.toLngLat(c.x + x * Math.cos(a) - z * Math.sin(a), c.z + x * Math.sin(a) + z * Math.cos(a));
+      q[0] = ll.lng; q[1] = ll.lat;
+    });
+    if (next.properties.ridge_deg != null) next.properties.ridge_deg = ((Number(next.properties.ridge_deg) + deg) % 360 + 360) % 360;
+    this.replaceBuild(next);
+  }
+
+  /** take a part down: one placed here and never saved simply vanishes; a saved one is a removal to propose */
+  removeBuild(id: string) {
+    const f = this.buildFeature(id);
+    if (!f) return;
+    const known = this.o.pack()?.edits.features.some(x => String(x.properties.id) === id) || this.proposed.edits.some(x => String(x.properties.id) === id);
+    this.snapshot();
+    this.edits = this.edits.filter(x => String(x.properties.id) !== id);
+    if (known) {
+      const where = f.geometry.type === 'Point' ? f.geometry.coordinates : f.geometry.type === 'LineString' ? f.geometry.coordinates[0] : f.geometry.coordinates[0][0];
+      this.edits.push({ type: 'Feature', properties: this.stamp({ op: 'remove', layer: 'build', target: id, what: String(f.properties.kind) }), geometry: { type: 'Point', coordinates: [where[0], where[1]] } });
+    }
+    this.persist();
+    this.redraw();
+    this.select(null);
+    this.setHover(null);
+    this.o.onChange(this);
+  }
+
+  /** take down every part of a structure at once */
+  removeStructureParts(structure: string) {
+    const ids = this.buildParts(structure).map(f => String(f.properties.id));
+    for (const id of ids) this.removeBuild(id);
+  }
+
+  /** several parts as one change, one undo step */
+  private commitBuild(list: Feature[], select = String(list[list.length - 1].properties.id)) {
+    this.snapshot();
+    this.edits.push(...list);
+    this.persist();
+    this.redraw();
+    this.selectBuild(select);
+    this.o.onChange(this);
+  }
+
+  /** a changed part: a later feature with the same id replaces the earlier one, here and in the pack */
+  private replaceBuild(next: Feature) {
+    this.snapshot();
+    next.properties.reported = new Date().toISOString().slice(0, 10);
+    const at = this.edits.findIndex(x => String(x.properties.id) === String(next.properties.id) && x.properties.op === 'add');
+    if (at >= 0) this.edits[at] = next; else this.edits.push(next);
+    this.persist();
+    this.redraw();
+    this.selectBuild(String(next.properties.id));
+    this.o.onChange(this);
+  }
+
+  /** after a redraw the old object is gone; find the new one for the same part */
+  private selectBuild(id: string) {
+    const f = this.buildFeature(id);
+    const obj = f ? this.o.build.group.getObjectByName(`build:${id}`) : null;
+    if (f && obj) this.select({ kind: 'build', id, feature: f, object: obj, point: this.buildCentre(f) ?? new THREE.Vector3() });
+    else this.select(null);
   }
 
   // ---- keeping and saving ----------------------------------------------------------------------

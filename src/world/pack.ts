@@ -83,6 +83,8 @@ export interface PackData {
   zones: FeatureCollection;
   /** the owner's shapings of the ground: pads flattened, banks raised, hollows cut */
   terrain: FeatureCollection;
+  /** what has been built here, part by part: walls, floors, roofs */
+  build: FeatureCollection;
   /** the pack's own edits layer, as committed */
   edits: FeatureCollection;
   imagery: PackImagery | null;
@@ -155,8 +157,15 @@ export function parseTrees(csv: string, f: PackFrame): PackTree[] {
 //     add    · zones   — a Polygon with a `name` and a `kind`: a territory drawn on the ground
 //     add    · terrain — a Polygon with `terrain_op` (flatten, raise, lower), `height_m` or `to_m`,
 //                        `edge_m`: the ground shaped, with a bank that eases into the hill
+//     add    · build   — a part of a building, by `kind`: a `wall` (LineString; `height_m`,
+//                        `thick_m`, `material`, `smooth`, `base_m`, `openings[]`, `structure`), a
+//                        `floor` (Polygon; `level_m`, `thick_m`, `material`) or a `roof` (Polygon;
+//                        `form`, `eaves_m`, `pitch_deg`, `overhang_m`, `ridge_deg`, `material`)
+//     remove · build   — `target`, the id of a part that has been taken down
 //
-//   Applying them here, once, at load, means every consumer sees the same present.
+//   A later feature with the same id replaces an earlier one — that is how a wall is changed —
+//   which is the atlas's own merge rule. Applying them here, once, at load, means every consumer
+//   sees the same present.
 
 type XY = { x: number; y: number };
 
@@ -242,11 +251,28 @@ export function applyEdits(pack: PackData, extra: Feature[] = []): PackData {
         return to && f.geometry.type === 'Point' ? { ...f, properties: { ...f.properties, moved: true }, geometry: { type: 'Point', coordinates: to } } : f;
       })
   };
-  pack.notes = { type: 'FeatureCollection', features: all.filter(e => e.properties.op === 'add' && e.properties.layer === 'notes' && e.geometry.type === 'Point') };
-  pack.lines = { type: 'FeatureCollection', features: all.filter(e => e.properties.op === 'add' && e.properties.layer === 'lines' && e.geometry.type === 'LineString') };
-  pack.zones = { type: 'FeatureCollection', features: all.filter(e => e.properties.op === 'add' && e.properties.layer === 'zones' && e.geometry.type === 'Polygon') };
-  pack.terrain = { type: 'FeatureCollection', features: all.filter(e => e.properties.op === 'add' && e.properties.layer === 'terrain' && e.geometry.type === 'Polygon') };
+  const added = (layer: string, ...types: string[]) => lastById(all.filter(e => e.properties.op === 'add' && e.properties.layer === layer && types.includes(e.geometry.type)));
+  pack.notes = { type: 'FeatureCollection', features: added('notes', 'Point') };
+  pack.lines = { type: 'FeatureCollection', features: added('lines', 'LineString') };
+  pack.zones = { type: 'FeatureCollection', features: added('zones', 'Polygon') };
+  pack.terrain = { type: 'FeatureCollection', features: added('terrain', 'Polygon') };
+  // a part taken down is gone, whichever feature added it
+  const down = new Set(all.filter(e => e.properties.op === 'remove' && e.properties.layer === 'build' && typeof e.properties.target === 'string').map(e => String(e.properties.target)));
+  pack.build = { type: 'FeatureCollection', features: added('build', 'LineString', 'Polygon').filter(f => !down.has(String(f.properties.id))) };
   return pack;
+}
+
+/** the same list with a later feature replacing an earlier one of the same id, in first-seen order */
+function lastById(list: Feature[]): Feature[] {
+  const at = new Map<string, number>();
+  const out: Feature[] = [];
+  for (const f of list) {
+    const id = String(f.properties.id ?? '');
+    if (id && at.has(id)) { out[at.get(id)!] = f; continue; }
+    if (id) at.set(id, out.length);
+    out.push(f);
+  }
+  return out;
 }
 
 /** the directory the manifest lives in, whether the url named the file or the folder */
@@ -287,6 +313,6 @@ export async function loadPack(url: string): Promise<PackData | null> {
   const record = treesCsv ? parseTrees(treesCsv, manifest.frame) : [];
   return applyEdits({
     base, manifest, record, trees: record, removed: 0, survey, county, roofs, vision,
-    visionNow: vision, notes: EMPTY, lines: EMPTY, zones: EMPTY, terrain: EMPTY, edits, imagery, materials
+    visionNow: vision, notes: EMPTY, lines: EMPTY, zones: EMPTY, terrain: EMPTY, build: EMPTY, edits, imagery, materials
   });
 }

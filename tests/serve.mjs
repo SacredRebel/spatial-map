@@ -110,6 +110,8 @@ export function start(port = PORT) {
           ? [{ type: 'block', name: 'the shed', w: 6, d: 4, h: 3, e: 10, n: 0, heading: 90 }, { type: 'marker', name: 'shed door', e: 7, n: 0 }]
           : /orchard/.test(last)
             ? [{ type: 'zone', name: 'the orchard', kind: 'orchard', points: [[0, 0], [20, 0], [20, 15], [0, 15]] }, { type: 'terrain', op: 'flatten', height_m: 0, edge_m: 2, points: [[30, 0], [40, 0], [40, 10], [30, 10]] }]
+          : /annex/.test(last)
+            ? [{ type: 'room', name: 'the annex', w: 5, d: 4, h: 3, wall: 'adobe', roof: 'vault', door: true, e: 15, n: 0, heading: 0 }, { type: 'wall', points: [[0, -6], [8, -6]], height_m: 2, thick_m: 0.3, material: 'stone', door_at_m: 4 }]
             : [];
         return send(res, 200, JSON.stringify({ ok: true, reply: actions.length ? 'A shed, then: six by four, three metres high, ten metres east of the box, with a marker at its door.' : 'Tell me a shape.', actions, stub: false }), TYPES['.json']);
       }

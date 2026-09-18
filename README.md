@@ -64,7 +64,7 @@ to look around · wheel to pull the camera back. Touch: one finger looks.
 project's post and put it where it really goes; pin a marker with a name (the gate, the well, the
 place a photograph was taken); draw a fence, a path, a road. Tools on **1–6**, **Enter** finishes a
 line, **Esc** cancels, **Ctrl Z** undoes. In edit mode the left button selects and places and the
-right button looks around.
+right button looks around. Construction is on **L F R O** (wall, floor, roof, opening).
 
 **Blocks, at real size.** Tool **7** puts down a block — so many metres by so many, so high — facing
 the way you face, on a metre grid that lies on the hillside (**V** shows it anywhere). Drag it to
@@ -79,7 +79,7 @@ the map's own grammar: a block of such a size so many metres east of the box, a 
 there, a marker, trees taken down, a tree planted. Each proposal is a card; nothing happens until
 you take it, and a taken one is an ordinary unsaved edit — undo it, see it, save it like anything
 else. The agent can do nothing a builder could not do by hand. With `ANTHROPIC_API_KEY` on the
-atlas the agent is Claude with those five tools and nothing else; without it, a small parser
+atlas the agent is Claude with eleven tools and nothing else; without it, a small parser
 answers plain commands and says so. The transcript stays with the box, in your browser.
 
 **Territories and the ground.** Tool **9** draws a territory — click the corners, Enter closes the
@@ -90,6 +90,22 @@ that eases back into the hill. The record's tiles are never rewritten: a shaping
 the height field applies after the tiles, and because the terrain mesh, every tree, every building,
 the walker and the grid all ask that one function, they follow without knowing.
 
+**Construction.** A building here is *parts*: a wall is a line with a height and a thickness, a
+floor is a polygon with a level, a roof is a polygon with a form. Tool **L** draws a wall along the
+grid — every point snaps to the half metre and to the end of any wall near it; click the start again
+and it closes into a room — with a height, a thickness, a material and, ticked, *curved*, which bends
+a smooth curve through the points for organic, bio-mimetic forms. **F** lays a floor you stand on
+(a slab, a deck, an upper storey at any level); **R** raises a roof — flat, shed, gable, hip or a
+vault — with its eaves height, pitch and overhang, the ridge along the longest side; **O** cuts a
+door or a window into a wall where you click. **room…** puts down a whole room where you stand: a
+floor, a closed wall with a door in the side facing you, a roof. Select a part and every number is
+changed in place on its card; drag it to move it, **[ ]** turn it, take it down alone or with every
+part of its structure. Walls stop the walker except at the doors; floors are the ground once you are
+on them. Each part is one feature of the pack's `build` layer, so the house is a dozen small files
+of coordinates and not a model, and a later feature with the same id replaces the earlier one —
+that is how a wall is changed. The magic box builds too: "a cabin 6 by 4 in adobe with a vault
+roof", "a curved stone wall 10 m east with a door".
+
 **Three roles.** A *member* walks, flies and reads — click a post, a building, a block, and a card
 says what it is. A *builder* has every tool, and what a builder saves is a **proposal** that waits
 for an admin. An *admin* saves at once and decides the proposals. The role comes from a PIN the
@@ -97,7 +113,8 @@ atlas checks (`POST /api/pack/role`); the table of who-may-what is `world/roles.
 so a wallet or a Holochain agent key can replace the PIN later without touching a gate.
 
 Every edit is one feature of the pack's own `edits.geojson` grammar (`op` × `layer`: remove or add
-trees, move or remove a project, add a marker, add a line), applied on top of the record the moment
+trees, move or remove a project, add a marker, a line, a territory, a shaping, a part of a building),
+applied on top of the record the moment
 it is made, kept in the browser until it is saved, and downloadable as `edits.geojson`. **Save to
 pack…** (or **propose…**) sends the edits and the structure changes with the PIN to the atlas's
 `POST /api/pack/proposals`, which validates each one, records the proposal in git, and — for an
@@ -210,7 +227,8 @@ generated on the spot by `tests/fixture.mjs` — no binaries in the repo, nothin
 boots the built world against it headless and writes a screenshot — `fly` from 50 m up, `edit` with
 the editor open and a marker, a fence and a path already drawn, `place` with a block on the grid,
 `magic` at a box with a conversation and its proposals, `ground` with a pad flattened, a bank raised,
-two territories and a block on the pad.
+two territories and a block on the pad, `build` with a house put up part by part on a flattened pad —
+a room, a curved adobe wing under a vault, a deck — and `inside` standing in its doorway.
 
 ## What is next
 
@@ -223,8 +241,9 @@ two territories and a block on the pad.
   land's own grain.
 - **The house.** The new build as a `.glb`, sited from the surveyed line and never from the county
   ring, in the atlas's registry so it appears here the moment it is placed there.
-- **Construction.** Walls as lines and curves with height and thickness, floors, roofs, openings —
-  the house built element by element, at real size, and walked through.
+- **Construction, further.** Stairs between floors; walls that meet cleanly when drawn as separate
+  lines; textures on the parts from the pack's materials; a model broken into parts (a `.glb` from
+  meshy.ai split into walls, floor and roof so it is edited like the rest).
 - **Real collision.** three-mesh-bvh against the models once there are models.
 - **Presence.** Seeing each other: position, heading and animation state at about 10 Hz.
 
