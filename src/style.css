@@ -136,3 +136,24 @@ canvas { display: block; touch-action: none; }
 .inspect small { display: block; margin-top: 4px; color: var(--ink-3); }
 .inspect .ep-x { position: absolute; top: 6px; right: 8px; }
 @media (max-width: 640px) { .inspect { bottom: 150px; } }
+
+/* the magic box's chat */
+.magic { position: fixed; left: 14px; bottom: 64px; width: min(92vw, 360px); max-height: 60vh; display: flex; flex-direction: column; border-radius: 12px; background: var(--panel); border: 1px solid rgba(201,162,255,0.45); z-index: 4; font-size: 12px; color: var(--ink-2); }
+.magic[hidden] { display: none; }
+.mg-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.mg-head b { color: var(--violet); }
+.mg-head span { flex: 1; font: 500 10px var(--mono); color: var(--ink-3); }
+.mg-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--ink-3); }
+.mg-log { flex: 1; overflow: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; }
+.mg-turn { max-width: 92%; }
+.mg-turn.you { align-self: flex-end; }
+.mg-turn.you .mg-text { background: rgba(224,182,74,0.14); border: 1px solid rgba(224,182,74,0.3); }
+.mg-text { padding: 6px 9px; border-radius: 10px; background: rgba(255,255,255,0.05); border: 1px solid var(--line); color: var(--ink); white-space: pre-wrap; }
+.mg-actions { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.mg-action { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 8px; border: 1px dashed rgba(201,162,255,0.5); font-size: 11px; }
+.mg-action span { flex: 1; }
+.mg-action.taken { border-style: solid; opacity: 0.7; }
+.mg-action em { color: #7fe0c8; font-style: normal; font-size: 10px; }
+.mg-say { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--line); }
+.mg-say input { flex: 1; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255,255,255,0.05); color: var(--ink); font: 500 12px var(--font); }
+@media (max-width: 640px) { .magic { left: 10px; right: 10px; width: auto; bottom: 150px; max-height: 46vh; } }

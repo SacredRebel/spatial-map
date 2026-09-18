@@ -16,7 +16,8 @@ const TOOLS: { id: Tool; key: string; label: string; hint: string; needs?: keyof
   { id: 'fence', key: '4', label: '⌇ fence', hint: 'click along the line · Enter to finish' },
   { id: 'path', key: '5', label: '⋯ path', hint: 'click along the path · Enter to finish' },
   { id: 'road', key: '6', label: '═ road', hint: 'click along the road · Enter to finish' },
-  { id: 'block', key: '7', label: '▢ block', hint: 'set the size, then click the ground to put it down facing the way you face', needs: 'place' }
+  { id: 'block', key: '7', label: '▢ block', hint: 'set the size, then click the ground to put it down facing the way you face', needs: 'place' },
+  { id: 'magic', key: '8', label: '✦ magic box', hint: 'click the ground to put down a box you can talk to', needs: 'magic' }
 ];
 
 export interface PanelOpts {
@@ -96,8 +97,8 @@ export class Panel {
         return `<div class="ep-sel"><b>${esc(p.name)}</b> <small>project</small>
           <div class="ep-row"><button class="btn" data-act="move">⤒ move here…</button><button class="btn" data-act="remove">✕ take off the map</button></div></div>`;
       case 'note':
-        return `<div class="ep-sel"><b>${esc(p.name)}</b> <small>marker</small>
-          <div class="ep-row"><button class="btn" data-act="remove">✕ remove</button></div></div>`;
+        return `<div class="ep-sel"><b>${esc(p.name)}</b> <small>${p.magic ? 'magic box' : 'marker'}</small>
+          <div class="ep-row">${p.magic ? `<button class="btn gold" data-act="talk">✦ talk</button>` : ''}<button class="btn" data-act="remove">✕ remove</button></div></div>`;
       case 'line':
         return `<div class="ep-sel"><b>${esc(this.lineName(p.id))}</b> <small>drawn</small>
           <div class="ep-row"><button class="btn" data-act="remove">✕ remove</button></div></div>`;
@@ -154,6 +155,7 @@ export class Panel {
       case 'grid': e.toggleGrid(); break;
       case 'download': e.download(); break;
       case 'gone': if (s?.kind === 'tree') e.markGone(s.tree); break;
+      case 'talk': if (s?.kind === 'note' && s.magic) e.openMagic(s.id); break;
       case 'move': if (s?.kind === 'vision') e.beginMove(s.id, s.name); break;
       case 'remove': if (s) e.remove(s); break;
       case 'rot-': if (s?.kind === 'structure') e.rotateStructure(s.id, -15); break;

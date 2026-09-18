@@ -42,7 +42,7 @@ export class Hud {
     this.root.className = 'hud';
     this.root.innerHTML = `
       <header class="hud-top">
-        <div class="brand"><span class="mark">◈</span><b>${esc(o.community)}</b><span class="sub">walkable world · v0.6</span></div>
+        <div class="brand"><span class="mark">◈</span><b>${esc(o.community)}</b><span class="sub">walkable world · v0.7</span></div>
         <div class="acts">
           <button class="btn" data-act="view" title="first / third person (C)">👤 view</button>
           <button class="btn" data-act="fly" data-el="fly" title="fly / walk (G)">🕊 fly</button>
@@ -119,7 +119,7 @@ export class Hud {
     this.q('[data-el="fly"]').classList.toggle('on', flying);
     this.q('[data-el="edit"]').classList.toggle('on', editing);
     this.q('[data-el="keys"]').innerHTML = editing
-      ? 'click to select or place · drag a block to move it · <b>[ ]</b> turn · <b>1–7</b> tools · <b>V</b> grid · <b>Enter</b> finish a line · <b>Esc</b> cancel · <b>Ctrl Z</b> undo · right-drag to look · <b>B</b> leave edit'
+      ? 'click to select or place · drag a block to move it · <b>[ ]</b> turn · <b>1–8</b> tools · <b>V</b> grid · <b>Enter</b> finish a line · <b>Esc</b> cancel · <b>Ctrl Z</b> undo · right-drag to look · <b>B</b> leave edit'
       : flying
         ? 'W A S D fly · <b>Space</b> up · <b>X</b> down · <b>Shift</b> fast · <b>Q E</b> turn · wheel speed · <b>G</b> land · <b>B</b> edit'
         : 'W A S D move · <b>Shift</b> run · <b>Space</b> jump · <b>C</b> first person · <b>G</b> fly · <b>B</b> edit · drag or click to look · wheel to zoom out';

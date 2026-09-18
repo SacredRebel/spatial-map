@@ -1,4 +1,4 @@
-// Look at the world: node scripts/shot.mjs "<url>" out.png [lng,lat,heading] [first|third|fly|edit|place]
+// Look at the world: node scripts/shot.mjs "<url>" out.png [lng,lat,heading] [first|third|fly|edit|place|magic]
 //
 //   `fly` takes off and looks down from 50 m; `edit` does that and opens the editor with a marker
 //   and a fence already made, so the panel and the drawn things are in the picture; `place` puts a
@@ -25,6 +25,26 @@ if (at) {
   await page.evaluate(([lng, lat, heading]) => window.world.goto(lng, lat, heading || 0), [lng, lat, heading]);
 }
 if (view === 'first' || view === 'third') await page.evaluate(v => window.world.player.setView(v), view);
+if (view === 'magic') {
+  // stand at a box, with a conversation and two proposals already in the transcript
+  await page.evaluate(() => {
+    const w = window.world;
+    w.setSession({ role: 'admin', pin: '0000' });
+    w.editor.setActive(true);
+    w.player.setView('third');
+    const s = w.state();
+    const MX = 111320 * Math.cos(s.lat * Math.PI / 180), MY = 110574;
+    const id = w.editor.addMagic(s.lng + 6 / MX, s.lat + 8 / MY, 'the knoll');
+    w.magic.turns.push({ role: 'you', text: 'I want a small guest cabin here, facing the valley, with a deck on the south side', at: Date.now() });
+    w.magic.turns.push({ role: 'agent', text: 'A cabin, then: six by four metres and three high, its long side to the valley, and a deck four by three on its south side. Take what you want.', actions: [
+      { type: 'block', name: 'guest cabin', w: 6, d: 4, h: 3, e: 0, n: 0, heading: 200 },
+      { type: 'block', name: 'deck', w: 4, d: 3, h: 0.5, e: 0, n: -4, heading: 200 },
+      { type: 'marker', name: 'cabin door', e: 0, n: -2 }
+    ], taken: [false, false, false], at: Date.now() });
+    w.magic.take(w.magic.turns.length - 1, 0);
+    w.editor.openMagic(id);
+  });
+}
 if (view === 'fly' || view === 'edit' || view === 'place') {
   await page.evaluate(mode => {
     const w = window.world, p = w.player;

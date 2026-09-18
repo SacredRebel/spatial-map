@@ -27,12 +27,14 @@ export interface Caps {
   commit: boolean;
   /** approve or reject other people's proposals */
   approve: boolean;
+  /** the magic box: talk to the agent, take its proposals */
+  magic: boolean;
 }
 
 export const CAPS: Record<Role, Caps> = {
-  member:  { fly: true, inspect: true, edit: false, place: false, propose: false, commit: false, approve: false },
-  builder: { fly: true, inspect: true, edit: true,  place: true,  propose: true,  commit: false, approve: false },
-  admin:   { fly: true, inspect: true, edit: true,  place: true,  propose: true,  commit: true,  approve: true }
+  member:  { fly: true, inspect: true, edit: false, place: false, propose: false, commit: false, approve: false, magic: false },
+  builder: { fly: true, inspect: true, edit: true,  place: true,  propose: true,  commit: false, approve: false, magic: true },
+  admin:   { fly: true, inspect: true, edit: true,  place: true,  propose: true,  commit: true,  approve: true,  magic: true }
 };
 
 export interface Session { role: Role; pin: string | null }

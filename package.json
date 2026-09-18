@@ -1,6 +1,6 @@
 {
   "name": "spatial-map",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "description": "The walkable world — a browser-native open world over real 1 m terrain, one world per community.",

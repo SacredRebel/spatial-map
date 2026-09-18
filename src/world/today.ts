@@ -21,7 +21,7 @@ export interface TodayTiles { asphalt?: THREE.Texture | null; asphaltMetres?: nu
 
 export interface TodayCounts {
   buildings: number; pads: number; monuments: number; roads: number; zones: number; lines: number;
-  notes: number; drawn: number;
+  notes: number; magic: number; drawn: number;
 }
 
 const ROOF = new THREE.Color('#8b7d6e');
@@ -39,7 +39,7 @@ const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
 export class Today {
   group = new THREE.Group();
   solids: Solid[] = [];
-  counts: TodayCounts = { buildings: 0, pads: 0, monuments: 0, roads: 0, zones: 0, lines: 0, notes: 0, drawn: 0 };
+  counts: TodayCounts = { buildings: 0, pads: 0, monuments: 0, roads: 0, zones: 0, lines: 0, notes: 0, magic: 0, drawn: 0 };
   private disposables: (THREE.BufferGeometry | THREE.Material | THREE.Texture)[] = [];
 
   constructor(private frame: Frame, private field: HeightField) {
@@ -253,20 +253,45 @@ export class Today {
       const marker = new THREE.Group();
       marker.name = `note:${String(f.properties.id || this.counts.notes)}`;
       marker.position.set(w.x, this.field.atOr(lng, lat, 0), w.z);
-      const postGeo = new THREE.CylinderGeometry(0.04, 0.04, 1.6, 8);
-      const postMat = new THREE.MeshLambertMaterial({ color: TEAL });
-      const post = new THREE.Mesh(postGeo, postMat);
-      post.position.y = 0.8;
-      post.castShadow = true;
-      marker.add(post);
-      const tex = this.label(String(f.properties.name || 'note'), false, TEAL);
+      const magic = f.properties.kind === 'magic';
+      if (magic) {
+        // the magic box: a cube of the vision's violet, hovering, with a thin post under it
+        const boxGeo = new THREE.BoxGeometry(0.7, 0.7, 0.7);
+        const boxMat = new THREE.MeshLambertMaterial({ color: VIOLET, emissive: VIOLET, emissiveIntensity: 0.35, transparent: true, opacity: 0.85 });
+        const box = new THREE.Mesh(boxGeo, boxMat);
+        box.position.y = 1.5;
+        box.rotation.set(Math.PI / 5, Math.PI / 4, 0);
+        box.castShadow = true;
+        marker.add(box);
+        const edgeGeo = new THREE.EdgesGeometry(boxGeo);
+        const edgeMat = new THREE.LineBasicMaterial({ color: '#f2efe6', transparent: true, opacity: 0.8 });
+        const edges = new THREE.LineSegments(edgeGeo, edgeMat);
+        edges.position.copy(box.position); edges.rotation.copy(box.rotation);
+        marker.add(edges);
+        const stemGeo = new THREE.CylinderGeometry(0.02, 0.02, 1.1, 6);
+        const stemMat = new THREE.MeshLambertMaterial({ color: VIOLET });
+        const stem = new THREE.Mesh(stemGeo, stemMat);
+        stem.position.y = 0.55;
+        marker.add(stem);
+        this.disposables.push(boxGeo, boxMat, edgeGeo, edgeMat, stemGeo, stemMat);
+        this.counts.magic++;
+      } else {
+        const postGeo = new THREE.CylinderGeometry(0.04, 0.04, 1.6, 8);
+        const postMat = new THREE.MeshLambertMaterial({ color: TEAL });
+        const post = new THREE.Mesh(postGeo, postMat);
+        post.position.y = 0.8;
+        post.castShadow = true;
+        marker.add(post);
+        this.disposables.push(postGeo, postMat);
+      }
+      const tex = this.label(String(f.properties.name || (magic ? 'magic box' : 'note')), false, magic ? '#c9a2ff' : TEAL);
       const sprMat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
       const spr = new THREE.Sprite(sprMat);
       spr.scale.set(4.5, 1.125, 1);
-      spr.position.y = 2.2;
+      spr.position.y = magic ? 2.6 : 2.2;
       marker.add(spr);
       this.group.add(marker);
-      this.disposables.push(postGeo, postMat, tex, sprMat);
+      this.disposables.push(tex, sprMat);
       this.counts.notes++;
     }
   }
@@ -366,6 +391,6 @@ export class Today {
     for (const d of this.disposables) d.dispose();
     this.disposables = [];
     this.solids = [];
-    this.counts = { buildings: 0, pads: 0, monuments: 0, roads: 0, zones: 0, lines: 0, notes: 0, drawn: 0 };
+    this.counts = { buildings: 0, pads: 0, monuments: 0, roads: 0, zones: 0, lines: 0, notes: 0, magic: 0, drawn: 0 };
   }
 }

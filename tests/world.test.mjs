@@ -705,6 +705,44 @@ check('propose: a builder\'s save goes to the atlas as a proposal — it waits f
     && server.proposals.length === 2 && server.proposals[1].by === 'builder' && server.proposals[1].status === 'pending' && server.proposals[1].structures.length === 1 && server.proposals[1].note === 'a shed by the gate',
   { ...proposedBy, sent: server.proposals.length });
 
+// ---- the magic box ---------------------------------------------------------------------------------------
+// A box put down on the ground opens its chat; a line sent reaches the agent with the box and the
+// heading; the agent's proposals are cards, and taking one makes an ordinary unsaved edit at the
+// right place — the block ten metres east of the box, facing east, the marker at its door.
+const boxed = await page.evaluate(async ({ at }) => {
+  const w = window.world, ed = w.editor, mg = w.magic;
+  w.setSession({ role: 'admin', pin: '4242' });
+  ed.setActive(true);
+  w.goto(at[0], at[1], 45);
+  const id = ed.addMagic(at[0], at[1], 'the knoll');
+  const drawn = w.today.group.getObjectByName(`note:${id}`);
+  const isCube = !!drawn && drawn.children.some(c => c.geometry && c.geometry.type === 'BoxGeometry');
+  const opened = { open: ed.magicOpen === id, panel: !document.querySelector('.magic').hidden, title: document.querySelector('.mg-head b')?.textContent, greeting: mg.turns.length };
+  const turn = await mg.send('I want a shed here');
+  const cards = document.querySelectorAll('.mg-action').length;
+  const before = { unsaved: ed.unsaved, structures: w.structures.list.length };
+  const ok = mg.take(mg.turns.length - 1, 0);
+  const s = ed.structures[ed.structures.length - 1];
+  const c = ed.centroid(s);
+  const bw = w.frame.toWorld(at[0], at[1]);
+  const dims = ed.dimensions(s);
+  const ok2 = mg.take(mg.turns.length - 1, 1);
+  const marker = ed.edits[ed.edits.length - 1];
+  const mw = w.frame.toWorld(marker.geometry.coordinates[0], marker.geometry.coordinates[1]);
+  const twice = mg.take(mg.turns.length - 1, 0);
+  const stored = JSON.parse(localStorage.getItem(`spatial-map:magic:${id}`) || '[]');
+  return { id, drawn: !!drawn, isCube, opened, reply: turn?.text, actions: turn?.actions?.length, cards, before, ok, ok2, twice, east: +(c.x - bw.x).toFixed(2), north: +(bw.z - c.z).toFixed(2), dims, markerName: marker.properties.name, markerEast: +(mw.x - bw.x).toFixed(2), unsaved: ed.unsaved, stored: stored.length, takenFlags: mg.turns[mg.turns.length - 1].taken };
+}, { at: at(-30, 30) });
+check('magic: a box put down is a cube with a name, and its chat opens on it',
+  boxed.drawn && boxed.isCube && boxed.opened.open && boxed.opened.panel && /the knoll/.test(boxed.opened.title || '') && boxed.opened.greeting === 1, boxed.opened);
+check('magic: a line sent reaches the agent with the box, the heading and the transcript; the reply and its proposals come back as cards',
+  server.asked.length === 1 && server.asked[0].box.name === 'the knoll' && Math.abs(server.asked[0].box.lng - at(-30, 30)[0]) < 1e-9 && server.asked[0].heading === 45 && server.asked[0].turns === 2 && /shed/.test(boxed.reply || '') && boxed.actions === 2 && boxed.cards === 2,
+  { asked: server.asked[0], reply: boxed.reply, cards: boxed.cards });
+check('magic: taking a proposal makes an ordinary unsaved edit at the right place — the shed 10 m east of the box, 6 by 4, facing east; the marker at its door',
+  boxed.ok && boxed.ok2 && !boxed.twice && Math.abs(boxed.east - 10) < 0.6 && Math.abs(boxed.north) < 0.6 && Math.abs(boxed.dims.w - 6) < 0.01 && Math.abs(boxed.dims.d - 4) < 0.01 && Math.abs(boxed.dims.h - 3) < 0.05 && boxed.markerName === 'shed door' && Math.abs(boxed.markerEast - 7) < 0.01 && boxed.unsaved === boxed.before.unsaved + 2 && boxed.stored === 3 && boxed.takenFlags.every(Boolean),
+  { east: boxed.east, north: boxed.north, dims: boxed.dims, marker: [boxed.markerName, boxed.markerEast], unsaved: [boxed.before.unsaved, boxed.unsaved], stored: boxed.stored });
+await page.evaluate(() => { const w = window.world; w.editor.openMagic(null); while (w.editor.unsaved) w.editor.undo(); });
+
 // ---- a member reads --------------------------------------------------------------------------------------
 const read = await page.evaluate(() => {
   const w = window.world;

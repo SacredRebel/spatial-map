@@ -27,12 +27,12 @@ import { mergeChanges, type Structures, type Structure, type StructureChange } f
 import type { Caps } from '../world/roles';
 import type { GroundGrid } from './grid';
 
-export type Tool = 'select' | 'marker' | 'tree' | 'fence' | 'path' | 'road' | 'block';
+export type Tool = 'select' | 'marker' | 'tree' | 'fence' | 'path' | 'road' | 'block' | 'magic';
 
 export type Pick =
   | { kind: 'tree'; index: number; tree: PackTree; point: THREE.Vector3 }
   | { kind: 'vision'; id: string; name: string; object: THREE.Object3D; point: THREE.Vector3 }
-  | { kind: 'note'; id: string; name: string; object: THREE.Object3D; point: THREE.Vector3 }
+  | { kind: 'note'; id: string; name: string; magic: boolean; object: THREE.Object3D; point: THREE.Vector3 }
   | { kind: 'line'; id: string; object: THREE.Object3D; point: THREE.Vector3 }
   | { kind: 'building'; name: string; object: THREE.Object3D; point: THREE.Vector3 }
   | { kind: 'structure'; id: string; structure: Structure; object: THREE.Object3D; point: THREE.Vector3 }
@@ -255,7 +255,7 @@ export class Editor {
       if (!o || !o.name) continue;
       const [type, id] = o.name.split(':');
       if (type === 'vision') return { kind: 'vision', id, name: this.visionName(id), object: o, point: hit.point };
-      if (type === 'note') return { kind: 'note', id, name: this.noteName(id), object: o, point: hit.point };
+      if (type === 'note') return { kind: 'note', id, name: this.noteName(id), magic: this.noteIsMagic(id), object: o, point: hit.point };
       if (type === 'line') return { kind: 'line', id, object: o, point: hit.point };
       if (type === 'today') return { kind: 'building', name: id, object: o, point: hit.point };
       if (type === 'massing' || type === 'model' || type === 'plan' || type === 'site') {
@@ -277,6 +277,14 @@ export class Editor {
   private noteName(id: string): string {
     const f = this.o.pack()?.notes.features.find(x => String(x.properties.id) === id);
     return String(f?.properties.name || id);
+  }
+  private noteIsMagic(id: string): boolean {
+    const f = this.o.pack()?.notes.features.find(x => String(x.properties.id) === id);
+    return f?.properties.kind === 'magic';
+  }
+  /** a note as the pack now holds it */
+  note(id: string): Feature | null {
+    return this.o.pack()?.notes.features.find(x => String(x.properties.id) === id) ?? null;
   }
 
   // ---- structures: what is where, right now --------------------------------------------------------
@@ -384,6 +392,7 @@ export class Editor {
 
   select(p: Pick | null) {
     this.selection = p;
+    if (p && p.kind === 'note' && p.magic && this.o.caps().magic) this.magicOpen = p.id;
     this.setHover(this.hover);
     this.o.onChange(this);
   }
@@ -442,6 +451,7 @@ export class Editor {
       else if (k === '5') this.setTool('path');
       else if (k === '6') this.setTool('road');
       else if (k === '7') this.setTool('block');
+      else if (k === '8') this.setTool('magic');
     });
   }
 
@@ -458,6 +468,7 @@ export class Editor {
       case 'marker': if (p.kind === 'ground') this.promptNote(p.lng, p.lat); break;
       case 'tree': if (p.kind === 'ground') this.promptTree(p.lng, p.lat); break;
       case 'block': if (p.kind === 'ground' && this.o.caps().place) this.addBlock(p.lng, p.lat, this.block, this.o.player.state().headingDeg); break;
+      case 'magic': if (p.kind === 'ground' && this.o.caps().magic) this.promptMagic(p.lng, p.lat); break;
       case 'fence': case 'path': case 'road':
         if (p.kind === 'ground') { this.drawing.push([p.lng, p.lat]); this.previewLine(null); this.o.onChange(this); }
         break;
@@ -503,6 +514,12 @@ export class Editor {
     this.commit({ type: 'Feature', properties: this.stamp({ op: 'remove', layer: 'trees', radius_m: 0.6, what: `tree ${t.height.toFixed(1)} m` }), geometry: { type: 'Point', coordinates: [t.lng, t.lat] } });
   }
 
+  /** every tree within so many metres of a point is gone — the agent's "clear this" */
+  removeTreesAround(lng: number, lat: number, radius: number) {
+    const r = Math.min(50, Math.max(0.5, radius));
+    this.commit({ type: 'Feature', properties: this.stamp({ op: 'remove', layer: 'trees', radius_m: r, what: `trees within ${r} m` }), geometry: { type: 'Point', coordinates: [lng, lat] } });
+  }
+
   /** a tree that is there now */
   addTree(lng: number, lat: number, height: number, crown?: number) {
     this.commit({ type: 'Feature', properties: this.stamp({ op: 'add', layer: 'trees', height_m: height, crown_m: crown ?? Math.max(1, height / 3) }), geometry: { type: 'Point', coordinates: [lng, lat] } });
@@ -510,6 +527,24 @@ export class Editor {
 
   addNote(lng: number, lat: number, name: string) {
     this.commit({ type: 'Feature', properties: this.stamp({ op: 'add', layer: 'notes', name }), geometry: { type: 'Point', coordinates: [lng, lat] } });
+  }
+
+  /** a magic box: a marker you talk to. Returns its id, and the box's chat opens on it. */
+  addMagic(lng: number, lat: number, name: string): string {
+    const f: Feature = { type: 'Feature', properties: this.stamp({ op: 'add', layer: 'notes', kind: 'magic', name }), geometry: { type: 'Point', coordinates: [lng, lat] } };
+    this.commit(f);
+    const id = String(f.properties.id);
+    this.openMagic(id);
+    return id;
+  }
+
+  /** the box whose chat is open, if any; the magic panel watches this */
+  magicOpen: string | null = null;
+  openMagic(id: string | null) { this.magicOpen = id; this.o.onChange(this); }
+
+  private promptMagic(lng: number, lat: number) {
+    const name = (this.o.ask?.('Name this magic box', 'magic box') ?? window.prompt('Name this magic box', 'magic box'))?.trim();
+    if (name) this.addMagic(lng, lat, name);
   }
 
   addLine(kind: 'fence' | 'path' | 'road', coords: [number, number][], name: string) {

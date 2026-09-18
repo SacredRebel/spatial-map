@@ -65,7 +65,7 @@ export class Inspect {
         const what = s.status === 'massing' ? 'a block, to judge the size' : s.status === 'model' ? 'a designed building' : 'ground reserved';
         return `<b>${esc(s.name)}</b><span class="in-kind">${what} · ${esc(s.mode)}</span>${d.w ? `<p>${d.w.toFixed(1)} × ${d.d.toFixed(1)} m (${Math.round(d.w / FT)} × ${Math.round(d.d / FT)} ft)${d.h ? `, ${d.h.toFixed(1)} m high` : ''}</p>` : ''}${s.note ? `<p>${esc(s.note)}</p>` : ''}`;
       }
-      case 'note': return `<b>${esc(p.name)}</b><span class="in-kind">marker</span>`;
+      case 'note': return `<b>${esc(p.name)}</b><span class="in-kind">${p.magic ? 'magic box · a place to create from — builders and admins talk to it' : 'marker'}</span>`;
       case 'line': {
         const f = pack?.lines.features.find(x => String(x.properties.id) === p.id);
         return `<b>${esc(f?.properties.name ?? p.id)}</b><span class="in-kind">${esc(f?.properties.kind ?? 'line')}</span>`;

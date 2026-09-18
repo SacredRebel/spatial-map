@@ -33,6 +33,7 @@ import { Today, type TodayTiles } from './world/today';
 import { loadGrain, loadTile } from './world/grain';
 import { Editor } from './edit/editor';
 import { Panel } from './edit/panel';
+import { Magic } from './edit/magic';
 import { GroundGrid } from './edit/grid';
 import { Inspect } from './ui/inspect';
 import { CAPS, loadSession, saveSession, roleFor, type Session } from './world/roles';
@@ -149,8 +150,9 @@ const editor = new Editor({
   structuresBase: () => structuresBase,
   caps,
   rebuild: (edits, changes) => rebuild(edits, changes),
-  onChange: () => { panel.render(); hud.setMode(player.mode === 'fly', editor.active); }
+  onChange: () => { panel.render(); magic.open(editor.magicOpen); hud.setMode(player.mode === 'fly', editor.active); }
 });
+const magic = new Magic(app, editor, { atlas, pack: () => pack, session: () => session, heading: () => player.state().headingDeg });
 const panel = new Panel(app, editor, {
   askPin: () => session.pin ?? window.prompt('The atlas PIN:'),
   role: () => session.role,
@@ -377,7 +379,7 @@ function packLine(p: PackData): string {
 
 // a small surface for tests and for the Playground shell to drive
 const api = {
-  player, frame, field, terrain, vegetation, structures, today, sky, scene, camera, renderer, stick, editor, grid, inspect,
+  player, frame, field, terrain, vegetation, structures, today, sky, scene, camera, renderer, stick, editor, grid, inspect, magic,
   get ready() { return ready; },
   get pack() { return pack; },
   get session() { return session; },

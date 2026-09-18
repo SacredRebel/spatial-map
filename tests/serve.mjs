@@ -96,6 +96,21 @@ export function start(port = PORT) {
         if (role === 'admin') server.saved.push(...E);
         return send(res, 200, JSON.stringify({ ok: true, id, applied: role === 'admin', status: role === 'admin' ? 'approved' : 'pending', count: E.length + S.length, commit: role === 'admin' ? 'f1x7ur3000000' : undefined }), TYPES['.json']);
       }
+      // the atlas's agent, as the world sees it: a canned answer with two proposals, and the PIN checked
+      if (p === '/api/agent' && req.method === 'POST') {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        let body = {};
+        try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { body = {}; }
+        const role = body.pin === FIXTURE_PIN ? 'admin' : body.pin === BUILDER_PIN ? 'builder' : null;
+        if (!role) return send(res, 401, JSON.stringify({ ok: false, error: 'bad_pin' }), TYPES['.json']);
+        const last = (body.messages || []).slice(-1)[0]?.content || '';
+        server.asked.push({ box: body.box, heading: body.heading, text: last, turns: (body.messages || []).length });
+        const actions = /shed/.test(last)
+          ? [{ type: 'block', name: 'the shed', w: 6, d: 4, h: 3, e: 10, n: 0, heading: 90 }, { type: 'marker', name: 'shed door', e: 7, n: 0 }]
+          : [];
+        return send(res, 200, JSON.stringify({ ok: true, reply: actions.length ? 'A shed, then: six by four, three metres high, ten metres east of the box, with a marker at its door.' : 'Tell me a shape.', actions, stub: false }), TYPES['.json']);
+      }
       // the atlas's save endpoint, as the world sees it: the PIN is checked, the features are kept
       if (p === '/api/pack/edits' && req.method === 'POST') {
         const chunks = [];
@@ -146,6 +161,8 @@ export function start(port = PORT) {
   server.saved = [];
   /** every proposal the mock atlas received */
   server.proposals = [];
+  /** every question the mock agent was asked */
+  server.asked = [];
   return new Promise(resolve => server.listen(port, () => resolve(server)));
 }
 

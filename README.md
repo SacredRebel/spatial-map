@@ -73,6 +73,15 @@ its footprint in metres and feet off the label over it. The atlas's designed str
 reserved sites, massing blocks and `.glb` models) are picked and moved the same way. A block is a
 row of the atlas's `data/structures.json`, so what is placed here is what the atlas plans.
 
+**The magic box.** Tool **8** puts down a box you can talk to. Say what you want there — typed, or
+spoken, with the reply read back if you like — and the agent on the atlas answers and *proposes*, in
+the map's own grammar: a block of such a size so many metres east of the box, a fence from here to
+there, a marker, trees taken down, a tree planted. Each proposal is a card; nothing happens until
+you take it, and a taken one is an ordinary unsaved edit — undo it, see it, save it like anything
+else. The agent can do nothing a builder could not do by hand. With `ANTHROPIC_API_KEY` on the
+atlas the agent is Claude with those five tools and nothing else; without it, a small parser
+answers plain commands and says so. The transcript stays with the box, in your browser.
+
 **Three roles.** A *member* walks, flies and reads — click a post, a building, a block, and a card
 says what it is. A *builder* has every tool, and what a builder saves is a **proposal** that waits
 for an admin. An *admin* saves at once and decides the proposals. The role comes from a PIN the
@@ -171,6 +180,8 @@ action is one edit feature with its own id, `by: owner`, and the date, or one st
 whole row, or an id to remove); undo steps back through snapshots; the unsaved work lives in
 `localStorage` per pack and comes back on reload, minus anything the pack has since taken in.
 **`edit/panel.ts`** is the view of it; **`edit/grid.ts`** the metre raster on the ground;
+**`edit/magic.ts`** the box's chat — voice in through the browser's own recognition where it has
+one, voice out through its speech, the agent's proposals taken through the editor's own methods;
 **`ui/inspect.ts`** the member's card; **`world/roles.ts`** the table of who may do what.
 
 ## Testing
@@ -187,7 +198,8 @@ generated on the spot by `tests/fixture.mjs` — no binaries in the repo, nothin
 `PACK_DIR=../sulphur-mountain-world node tests/serve.mjs` serves a pack from disk at
 `/realpack/`, and `node scripts/shot.mjs "<url>" out.png [lng,lat,heading] [first|third|fly|edit|place]`
 boots the built world against it headless and writes a screenshot — `fly` from 50 m up, `edit` with
-the editor open and a marker, a fence and a path already drawn, `place` with a block on the grid.
+the editor open and a marker, a fence and a path already drawn, `place` with a block on the grid,
+`magic` at a box with a conversation and its proposals.
 
 ## What is next
 
@@ -200,8 +212,6 @@ the editor open and a marker, a fence and a path already drawn, `place` with a b
   land's own grain.
 - **The house.** The new build as a `.glb`, sited from the surveyed line and never from the county
   ring, in the atlas's registry so it appears here the moment it is placed there.
-- **The magic box.** A marker you talk to: text and voice in, an agent that proposes edits at that
-  spot through the same grammar, for you to confirm.
 - **Territories and terrain.** Zone polygons drawn on the ground; a pad flattened, ground raised or
   lowered, with everything that asks the height function following.
 - **Construction.** Walls as lines and curves with height and thickness, floors, roofs, openings —
