@@ -50,9 +50,9 @@ export class Today {
     this.group.name = 'today';
   }
 
-  build(pack: PackData, tiles: TodayTiles = {}) {
+  build(pack: PackData, tiles: TodayTiles = {}, cleared: Set<string> = new Set()) {
     this.dispose();
-    this.buildings(pack);
+    this.buildings(pack, cleared);
     this.survey(pack);
     this.roads(pack, tiles);
     this.zones(pack);
@@ -62,12 +62,14 @@ export class Today {
   }
 
   // ---- buildings --------------------------------------------------------------------------------
-  private buildings(pack: PackData) {
-    // county footprints, raised to what the lidar measured over them — or laid flat when it measured nothing
+  private buildings(pack: PackData, cleared: Set<string>) {
+    // county footprints, raised to what the lidar measured over them — or laid flat when it measured nothing;
+    // a kind a proposal clears is left out, so what replaces it is not drawn through it
     for (const f of pack.county.features) {
       if (f.properties.layer !== 'footprint' || f.geometry.type !== 'Polygon') continue;
       const lidar = f.properties.lidar_2018 as { kind?: string; roof_m?: number | null; roof_p50_m?: number } | undefined;
       const kind = (lidar?.kind || 'building') as string;
+      if (cleared.has(slug(kind))) continue;
       const h = lidar?.roof_p50_m ?? lidar?.roof_m ?? null;
       if (h == null || h < 1) this.pad(f.geometry.coordinates[0], kind);
       else this.prism(f.geometry.coordinates[0], h, kind, ROOF);
@@ -78,6 +80,7 @@ export class Today {
       if (f.properties.county_footprint != null) continue;
       const h = Number(f.properties.roof_m);
       if (!isFinite(h) || h < 1) continue;
+      if (cleared.has(slug(String(f.properties.kind || 'building')))) continue;
       this.prism(f.geometry.coordinates[0], h, String(f.properties.kind || 'building'), METAL);
     }
   }
