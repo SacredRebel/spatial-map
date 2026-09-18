@@ -27,6 +27,9 @@ export interface Structure {
   scale?: number;
 }
 
+/** a structure as a proposal carries it: a full row, or an id to take off the map */
+export type StructureChange = Structure & { remove?: boolean };
+
 const FT = 0.3048;
 
 export class Structures {
@@ -50,12 +53,27 @@ export class Structures {
 
   /** draw everything that belongs to this property; models are fetched in the background */
   build(pid?: string) {
+    this.clear();
     for (const s of this.list) {
       if (pid && s.pid !== pid) continue;
       if (s.status === 'model' && s.model && s.position) void this.addModel(s);
       else if (s.outline && s.outline.length >= 3) this.addPlan(s);
     }
   }
+
+  /** take everything down and free it, so a build after a change draws only what is now true */
+  clear() {
+    for (const o of this.group.children.slice()) {
+      o.traverse(c => {
+        const m = c as THREE.Mesh;
+        if (m.geometry) m.geometry.dispose();
+        const mat = m.material as THREE.Material | THREE.Material[] | undefined;
+        if (Array.isArray(mat)) mat.forEach(x => x.dispose()); else mat?.dispose();
+      });
+      this.group.remove(o);
+    }
+  }
+
 
   /** a ring of lng/lat as a world-space shape lying on the ground */
   private ring(outline: [number, number][]): { pts: THREE.Vector3[]; base: number } {
@@ -125,4 +143,20 @@ export class Structures {
       this.group.add(root);
     } catch (e) { console.info('[world] model ' + s.id, e); }
   }
+}
+
+/**
+ * The registry with a set of changes laid over it: a change with an id the list has replaces
+ * that row; a new id is appended; `remove: true` drops it. The atlas merges the same way, so what
+ * is drawn here is what the atlas will hold once the changes are saved.
+ */
+export function mergeChanges(list: Structure[], changes: StructureChange[]): Structure[] {
+  const out = list.slice();
+  for (const c of changes) {
+    const at = out.findIndex(s => s.id === c.id);
+    if (c.remove) { if (at >= 0) out.splice(at, 1); continue; }
+    const row = { ...c } as StructureChange; delete row.remove;
+    if (at >= 0) out[at] = row; else out.push(row);
+  }
+  return out;
 }

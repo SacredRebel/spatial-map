@@ -21,6 +21,8 @@ export interface HudOpts {
   onFly: () => void;
   /** edit mode on / off (B) */
   onEdit: () => void;
+  /** the role button: sign in with a PIN, or sign out */
+  onRole: () => void;
 }
 
 export class Hud {
@@ -40,11 +42,12 @@ export class Hud {
     this.root.className = 'hud';
     this.root.innerHTML = `
       <header class="hud-top">
-        <div class="brand"><span class="mark">◈</span><b>${esc(o.community)}</b><span class="sub">walkable world · v0.5</span></div>
+        <div class="brand"><span class="mark">◈</span><b>${esc(o.community)}</b><span class="sub">walkable world · v0.6</span></div>
         <div class="acts">
           <button class="btn" data-act="view" title="first / third person (C)">👤 view</button>
           <button class="btn" data-act="fly" data-el="fly" title="fly / walk (G)">🕊 fly</button>
           <button class="btn" data-act="edit" data-el="edit" title="edit the world (B)">✎ edit</button>
+          <button class="btn" data-act="role" data-el="role" title="who you are here">◌ member</button>
           <button class="btn" data-act="recentre" title="back to the start">⌖ recentre</button>
         </div>
       </header>
@@ -73,6 +76,7 @@ export class Hud {
     this.q('[data-act="recentre"]').addEventListener('click', () => o.onRecentre());
     this.q('[data-act="fly"]').addEventListener('click', () => o.onFly());
     this.q('[data-act="edit"]').addEventListener('click', () => o.onEdit());
+    this.q('[data-act="role"]').addEventListener('click', () => o.onRole());
     const time = this.q('[data-el="time"]') as HTMLInputElement;
     this.clock.textContent = `${pad(o.hours)}:${pad((o.hours % 1) * 60)}`;
     time.addEventListener('input', () => {
@@ -101,12 +105,21 @@ export class Hud {
     this.avatarLine.textContent = kind === 'vrm' ? 'VRM avatar' : kind === 'gltf' ? 'glTF avatar' : '';
   }
 
+  /** say who is here: a member, a builder, an admin */
+  setRole(role: 'member' | 'builder' | 'admin', canEdit: boolean) {
+    const b = this.q('[data-el="role"]');
+    b.textContent = role === 'admin' ? '◆ admin' : role === 'builder' ? '◇ builder' : '◌ member';
+    b.classList.toggle('on', role !== 'member');
+    b.title = role === 'member' ? 'enter a PIN to build or administer' : `${role} · click to sign out`;
+    this.q('[data-el="edit"]').hidden = !canEdit;
+  }
+
   /** light up the fly and edit buttons when they are on, and say what the keys do now */
   setMode(flying: boolean, editing: boolean) {
     this.q('[data-el="fly"]').classList.toggle('on', flying);
     this.q('[data-el="edit"]').classList.toggle('on', editing);
     this.q('[data-el="keys"]').innerHTML = editing
-      ? 'click to select or place · <b>1–6</b> tools · <b>Enter</b> finish a line · <b>Esc</b> cancel · <b>Ctrl Z</b> undo · right-drag to look · <b>B</b> leave edit'
+      ? 'click to select or place · drag a block to move it · <b>[ ]</b> turn · <b>1–7</b> tools · <b>V</b> grid · <b>Enter</b> finish a line · <b>Esc</b> cancel · <b>Ctrl Z</b> undo · right-drag to look · <b>B</b> leave edit'
       : flying
         ? 'W A S D fly · <b>Space</b> up · <b>X</b> down · <b>Shift</b> fast · <b>Q E</b> turn · wheel speed · <b>G</b> land · <b>B</b> edit'
         : 'W A S D move · <b>Shift</b> run · <b>Space</b> jump · <b>C</b> first person · <b>G</b> fly · <b>B</b> edit · drag or click to look · wheel to zoom out';

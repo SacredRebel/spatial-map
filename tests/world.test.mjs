@@ -499,6 +499,24 @@ check('fly: landing drops the body onto the surface under it',
 // ---- the editor: picking --------------------------------------------------------------------------
 // Stand 15 m south of a known tree, facing it. Its canopy projected to the screen must pick that
 // tree and no other; the ground picked at the screen's centre must be on the surface.
+// ---- roles ------------------------------------------------------------------------------------------
+// A member walks and reads; the pencil needs a builder or admin PIN, and the atlas says which.
+const roles = await page.evaluate(async () => {
+  const w = window.world, ed = w.editor;
+  const member = w.session.role;
+  ed.setActive(true);
+  const refused = { active: ed.active, editing: w.player.editing, said: ed.lastSave?.message, editButton: document.querySelector('[data-el="edit"]').hidden };
+  const r = await fetch(`${w.state().atlas}/api/pack/role`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin: '0000' }) });
+  const wrong = r.status;
+  const r2 = await fetch(`${w.state().atlas}/api/pack/role`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin: '2424' }) });
+  const builder = (await r2.json()).role;
+  w.setSession({ role: 'admin', pin: '4242' });
+  return { member, refused, wrong, builder, roleButton: document.querySelector('[data-el="role"]').textContent, editButton: document.querySelector('[data-el="edit"]').hidden };
+});
+check('roles: a member cannot pick up the pencil — B does nothing and the edit button is not offered',
+  roles.member === 'member' && !roles.refused.active && !roles.refused.editing && /PIN/.test(roles.refused.said || '') && roles.refused.editButton === true, roles.refused);
+check('roles: the atlas turns a PIN into a role, and a role into the buttons', roles.wrong === 401 && roles.builder === 'builder' && /admin/.test(roles.roleButton) && roles.editButton === false, { wrong: roles.wrong, builder: roles.builder, button: roles.roleButton });
+
 const treeAt = (e, n) => PACK_STANDING.findIndex(t => t.e === e && t.n === n);
 const pickTree = await page.evaluate(({ tree, from }) => {
   const w = window.world, ed = w.editor;
@@ -545,7 +563,7 @@ const edited = await page.evaluate(({ tree, moveTo, noteAt, plantAt, fence }) =>
   ed.addLine('fence', fence, 'north fence');
   const lineId = ed.edits[ed.edits.length - 1].properties.id;
   const drawn = { found: !!w.today.group.getObjectByName(`line:${lineId}`), count: w.today.counts.drawn };
-  const stored = JSON.parse(localStorage.getItem(`spatial-map:edits:${w.pack.manifest.id}`) || '[]');
+  const stored = JSON.parse(localStorage.getItem(`spatial-map:edits:${w.pack.manifest.id}`) || '{"edits":[]}').edits;
   const ops = ed.edits.map(f => `${f.properties.op}:${f.properties.layer}`);
   const stamped = ed.edits.every(f => /^e-/.test(f.properties.id) && f.properties.by === 'owner' && f.properties.authority === 'owner' && /^\d{4}-\d\d-\d\d$/.test(f.properties.reported))
     && ed.edits.find(f => f.properties.op === 'move').properties.target === 'retreat';
@@ -592,10 +610,116 @@ const saved = await page.evaluate(async () => {
 });
 check('save: the wrong PIN is refused and nothing is lost', !saved.wrong.ok && /wrong PIN/.test(saved.wrong.message) && saved.still === 4, saved.wrong);
 check('save: the right PIN commits the edits to the pack — they leave the unsaved list, join the pack\'s edits layer, and the world does not change',
-  saved.right.ok && saved.edits === 0 && saved.inPack === 3 + 4 && saved.trees === PACK_STANDING.length && saved.removed === 4 && saved.notes === 1 && saved.stored === '[]' && server.saved.length === 4,
-  { ...saved.right, inPack: saved.inPack, sent: server.saved.length });
+  saved.right.ok && saved.edits === 0 && saved.inPack === 3 + 4 && saved.trees === PACK_STANDING.length && saved.removed === 4 && saved.notes === 1 && JSON.parse(saved.stored).edits.length === 0 && server.saved.length === 4 && server.proposals.length === 1 && server.proposals[0].by === 'admin' && server.proposals[0].status === 'approved',
+  { ...saved.right, inPack: saved.inPack, sent: server.saved.length, proposals: server.proposals.length });
 check('save: what reached the atlas is exactly what was made here', server.saved.every(f => f.type === 'Feature' && f.properties.by === 'owner') && server.saved.map(f => f.properties.op).join(' ') === 'remove move add add', server.saved.map(f => `${f.properties.op}:${f.properties.layer}`));
-await page.evaluate(() => window.world.editor.setActive(false));
+// ---- placement: a block at real size -----------------------------------------------------------------
+// A 12 × 8 × 4 m block put down facing east: its footprint reads 12 by 8, it stands on the ground,
+// it stops the walker, it turns in fifteen-degree steps about its own centre, it moves on a
+// half-metre snap, its height can be set, and undo takes each step back.
+const placed = await page.evaluate(({ at }) => {
+  const w = window.world, ed = w.editor;
+  ed.setActive(true);                              // the reload above left the pencil down
+  const before = { structures: w.structures.list.length, solids: w.player.solids.length };
+  const id = ed.addBlock(at[0], at[1], { name: 'the shed', w: 12, d: 8, h: 4 }, 90);
+  const s = ed.structure(id);
+  const dims = ed.dimensions(s);
+  const c0 = ed.centroid(s);
+  const obj = w.structures.group.getObjectByName(`massing:${id}`);
+  const solid = w.player.solids.find(x => x.id === id);
+  const sel = ed.selection && ed.selection.kind === 'structure' ? ed.selection.id : null;
+  // the corners, as put down: the first edge should run north-south, since the block faces east
+  const ring = s.outline.slice(0, 4).map(([lng, lat]) => w.frame.toWorld(lng, lat));
+  const edge0 = { dx: ring[1].x - ring[0].x, dz: ring[1].z - ring[0].z };
+  ed.rotateStructure(id, 15);
+  const dimsTurned = ed.dimensions(ed.structure(id));
+  const c1 = ed.centroid(ed.structure(id));
+  const ringTurned = ed.structure(id).outline.slice(0, 4).map(([lng, lat]) => w.frame.toWorld(lng, lat));
+  const edge1 = { dx: ringTurned[1].x - ringTurned[0].x, dz: ringTurned[1].z - ringTurned[0].z };
+  const angle = Math.atan2(edge1.dx * edge0.dz - edge1.dz * edge0.dx, edge1.dx * edge0.dx + edge1.dz * edge0.dz) * 180 / Math.PI;
+  ed.moveStructure(id, 10.3, 0);
+  const c2 = ed.centroid(ed.structure(id));
+  ed.setHeight(id, 6);
+  const h = ed.structure(id).heightFt;
+  const unsaved = ed.unsaved;
+  ed.undo(); ed.undo(); ed.undo();
+  const back = ed.structure(id);
+  const cBack = ed.centroid(back);
+  return { before, id, dims, y: c0.y, ground: w.field.atOr(at[0], at[1], NaN), drawn: !!obj, solid: !!solid, top: solid ? solid.top - solid.base : null, sel, edge0, angle: +angle.toFixed(1), dimsTurned, centreMoved: +Math.hypot(c1.x - c0.x, c1.z - c0.z).toFixed(3), east: +(c2.x - c1.x).toFixed(3), h, unsaved, backH: back.heightFt, backEast: +(cBack.x - c0.x).toFixed(3), unsavedAfter: ed.unsaved, listed: w.structures.list.length };
+}, { at: at(-40, -40) });
+check('place: a block put down at real size — 12 by 8 read off its own footprint, 4 m high, on the ground, drawn, solid, selected',
+  Math.abs(placed.dims.w - 12) < 0.01 && Math.abs(placed.dims.d - 8) < 0.01 && Math.abs(placed.dims.h - 4) < 0.05 && Math.abs(placed.y - placed.ground) < 0.6 && placed.drawn && placed.solid && Math.abs(placed.top - 4) < 0.05 && placed.sel === placed.id && placed.listed === placed.before.structures + 1,
+  { dims: placed.dims, y: +placed.y.toFixed(2), ground: +placed.ground.toFixed(2), drawn: placed.drawn, solid: placed.solid, top: placed.top });
+check('place: facing east, the block\'s first edge runs north-south; ] turns it 15° about its centre without changing its size',
+  Math.abs(placed.edge0.dx) < 0.01 && Math.abs(Math.abs(placed.edge0.dz) - 12) < 0.01 && Math.abs(Math.abs(placed.angle) - 15) < 0.2 && Math.abs(placed.dimsTurned.w - 12) < 0.01 && placed.centreMoved < 0.01,
+  { edge0: placed.edge0, angle: placed.angle, turned: placed.dimsTurned, centreMoved: placed.centreMoved });
+check('place: a move of 10.3 m east lands on the half-metre snap, the height can be set, and undo walks it all back',
+  Math.abs(placed.east - 10.5) < 0.01 && Math.abs(placed.h - 6 / 0.3048) < 0.1 && placed.unsaved === 1 && Math.abs(placed.backH - 4 / 0.3048) < 0.1 && Math.abs(placed.backEast) < 0.01 && placed.unsavedAfter === 1,
+  { east: placed.east, h: placed.h, backH: placed.backH, backEast: placed.backEast, unsaved: [placed.unsaved, placed.unsavedAfter] });
+
+const walls = await page.evaluate(({ id, at }) => {
+  const w = window.world, p = w.player, ed = w.editor;
+  const c = ed.centroid(ed.structure(id));
+  const ll = w.frame.toLngLat(c.x, c.z + 14);       // 14 m south of the block's centre, facing north; its south wall is 6 m from the centre
+  w.goto(ll.lng, ll.lat, 0);
+  p.key('w', true); for (let i = 0; i < 12; i++) p.update(1); p.key('w', false);
+  const s = p.state();
+  const here = w.frame.toWorld(s.lng, s.lat);
+  return { touching: s.touching, gap: +(here.z - (c.z + 6)).toFixed(2) };
+}, { id: placed.id, at: at(-40, -40) });
+check('place: the block stops the walker at its wall, like any building', walls.touching === placed.id && walls.gap > 0 && walls.gap < 0.6, walls);
+
+// ---- the grid ------------------------------------------------------------------------------------------
+const gridded = await page.evaluate(() => {
+  const w = window.world;
+  w.editor.frame();
+  const g = w.grid.group.children.map(l => l.geometry.getAttribute('position'));
+  const n = g.reduce((a, p) => a + p.count, 0);
+  let worst = 0, sampled = 0;
+  for (const pos of g) for (let i = 0; i < pos.count; i += 97) {
+    const ll = w.frame.toLngLat(pos.getX(i), pos.getZ(i));
+    const t = w.field.atOr(ll.lng, ll.lat, NaN);
+    if (!isFinite(t)) continue;
+    worst = Math.max(worst, Math.abs(pos.getY(i) - 0.06 - t)); sampled++;
+  }
+  const on = w.grid.visible;
+  w.editor.toggleGrid();
+  const off = w.grid.visible;
+  w.editor.toggleGrid();
+  return { on, off, n, worst: +worst.toFixed(3), sampled };
+});
+check('grid: a metre raster lies on the hillside while editing — thousands of segments, every sampled vertex on the surface — and V turns it off and on',
+  gridded.on && !gridded.off && gridded.n > 4000 && gridded.sampled > 20 && gridded.worst < 0.02, gridded);
+
+// ---- a builder proposes ---------------------------------------------------------------------------------
+const proposedBy = await page.evaluate(async () => {
+  const w = window.world, ed = w.editor;
+  w.setSession({ role: 'builder', pin: '2424' });
+  const label = document.querySelector('.edit-panel [data-act="save"]')?.textContent;
+  const r = await ed.save('2424', 'a shed by the gate');
+  const stillDrawn = !!w.structures.group.getObjectByName(`massing:${ed.proposed.structures[0]?.id}`);
+  return { role: w.session.role, label, r, unsaved: ed.unsaved, proposed: ed.proposed.structures.length, stillDrawn, header: document.querySelector('.ep-head span')?.textContent };
+});
+check('propose: a builder\'s save goes to the atlas as a proposal — it waits for an admin, stays drawn here, and leaves the unsaved list',
+  proposedBy.role === 'builder' && /propose/.test(proposedBy.label || '') && proposedBy.r.ok && /waiting for an admin/.test(proposedBy.r.message) && proposedBy.unsaved === 0 && proposedBy.proposed === 1 && proposedBy.stillDrawn && /1 proposed/.test(proposedBy.header || '')
+    && server.proposals.length === 2 && server.proposals[1].by === 'builder' && server.proposals[1].status === 'pending' && server.proposals[1].structures.length === 1 && server.proposals[1].note === 'a shed by the gate',
+  { ...proposedBy, sent: server.proposals.length });
+
+// ---- a member reads --------------------------------------------------------------------------------------
+const read = await page.evaluate(() => {
+  const w = window.world;
+  w.setSession({ role: 'member', pin: null });
+  const editorOff = !w.editor.active;
+  const post = w.today.group.getObjectByName('vision:retreat');
+  w.inspect.show({ kind: 'vision', id: 'retreat', name: 'Retreat Village', object: post, point: post.position.clone() });
+  const card = document.querySelector('.inspect');
+  const shown = { hidden: card.hidden, text: card.textContent };
+  w.inspect.show({ kind: 'ground', point: post.position.clone(), lng: 0, lat: 0 });
+  return { editorOff, shown, hiddenAfter: card.hidden, role: w.session.role };
+});
+check('read: signing out closes the editor; a click on a project as a member opens a card that says what it is, and the ground closes it',
+  read.editorOff && read.role === 'member' && !read.shown.hidden && /Retreat Village/.test(read.shown.text) && /planned|hospitality|project/.test(read.shown.text) && read.hiddenAfter, read);
+await page.evaluate(() => { window.world.setSession({ role: 'admin', pin: '4242' }); window.world.editor.setActive(false); });
 
 // and without a pack, the world is what it was: the rule plants everywhere and nothing stands
 const bare = await ctx.newPage();

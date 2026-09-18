@@ -2,13 +2,15 @@
 //
 //   Fly anywhere (G), then press B and the world becomes editable: click a tree and mark it gone,
 //   pick up a project's post and put it where it really goes, pin a marker with a name on the
-//   gate or the well or the place a photograph was taken, draw a fence, a path, a dirt road.
+//   gate or the well or the place a photograph was taken, draw a fence, a path, a dirt road. Put
+//   down a BLOCK — so many metres by so many, so high — and drag it about on a metre grid until it
+//   sits where the house would sit, and read off whether it fits.
 //
-//   Nothing here edits the record. Every action is one FEATURE of the pack's edits layer — the
-//   same `op` / `layer` grammar the pack already uses for the fourteen trees by the house — held
-//   unsaved in the browser, applied on top of the record so what you see is what will be saved,
-//   and committed to the pack's repository through the atlas with the owner's PIN. Undo pops the
-//   last one. Reload, and the unsaved ones are still there.
+//   Nothing here edits the record. Every action is one FEATURE of the pack's edits layer, or one
+//   CHANGE to the atlas's registry of designed structures — held unsaved in the browser, applied on
+//   top of what is known so what you see is what will be saved, and sent to the atlas as a
+//   PROPOSAL. An admin's proposal is applied at once; a builder's waits for an admin. Undo steps
+//   back through snapshots. Reload, and the unsaved ones are still there.
 //
 //   Picking: trees are instanced meshes, so a hit gives an instance id and the vegetation keeps
 //   the index back to the record; the ground is not raycast against the mesh at all but marched
@@ -21,8 +23,11 @@ import type { Vegetation } from '../world/vegetation';
 import type { Today } from '../world/today';
 import type { Player } from '../player/player';
 import type { Feature, PackData, PackTree } from '../world/pack';
+import { mergeChanges, type Structures, type Structure, type StructureChange } from '../world/structures';
+import type { Caps } from '../world/roles';
+import type { GroundGrid } from './grid';
 
-export type Tool = 'select' | 'marker' | 'tree' | 'fence' | 'path' | 'road';
+export type Tool = 'select' | 'marker' | 'tree' | 'fence' | 'path' | 'road' | 'block';
 
 export type Pick =
   | { kind: 'tree'; index: number; tree: PackTree; point: THREE.Vector3 }
@@ -30,7 +35,10 @@ export type Pick =
   | { kind: 'note'; id: string; name: string; object: THREE.Object3D; point: THREE.Vector3 }
   | { kind: 'line'; id: string; object: THREE.Object3D; point: THREE.Vector3 }
   | { kind: 'building'; name: string; object: THREE.Object3D; point: THREE.Vector3 }
+  | { kind: 'structure'; id: string; structure: Structure; object: THREE.Object3D; point: THREE.Vector3 }
   | { kind: 'ground'; point: THREE.Vector3; lng: number; lat: number };
+
+export interface BlockSpec { name: string; w: number; d: number; h: number }
 
 export interface EditorOpts {
   dom: HTMLElement;
@@ -40,11 +48,19 @@ export interface EditorOpts {
   player: Player;
   vegetation: Vegetation;
   today: Today;
+  structures: Structures;
+  grid: GroundGrid;
   scene: THREE.Scene;
   /** the pack, once it has loaded; null before */
   pack: () => PackData | null;
-  /** apply the unsaved edits on top of the record and redraw */
-  rebuild: (extra: Feature[]) => void;
+  /** the atlas's property id the structures belong to */
+  pid: () => string;
+  /** the atlas's registry as loaded, before any change made here */
+  structuresBase: () => Structure[];
+  /** what the current role may do */
+  caps: () => Caps;
+  /** apply the unsaved edits and structure changes on top of what is known and redraw */
+  rebuild: (edits: Feature[], structures: StructureChange[]) => void;
   /** the atlas origin — the save endpoint lives there */
   atlas: string;
   /** how to ask for a name or a number; window.prompt when absent (tests supply their own) */
@@ -52,43 +68,62 @@ export interface EditorOpts {
   onChange: (e: Editor) => void;
 }
 
+interface Snapshot { edits: Feature[]; structures: StructureChange[] }
+
 const KEY = (id: string) => `spatial-map:edits:${id}`;
+const FT = 0.3048;
+const SNAP_M = 0.5;
+const SNAP_DEG = 15;
+const TEAL = '#4fd1c5';
 
 export class Editor {
   active = false;
   tool: Tool = 'select';
+  /** unsaved edits to the pack's layers */
   edits: Feature[] = [];
+  /** unsaved changes to the atlas's structures */
+  structures: StructureChange[] = [];
+  /** sent as a proposal, still drawn here, waiting for an admin */
+  proposed: Snapshot = { edits: [], structures: [] };
   selection: Pick | null = null;
   hover: Pick | null = null;
   /** when a project's post has been picked up and is waiting for a ground click */
   moving: { id: string; name: string } | null = null;
   /** the line being drawn, as lng/lat pairs, before it is finished */
   drawing: [number, number][] = [];
+  /** the block the next ground click puts down */
+  block: BlockSpec = { name: 'block', w: 12, d: 8, h: 4 };
   /** what the last save said, for the panel */
   lastSave: { ok: boolean; message: string; at: number } | null = null;
+  private history: Snapshot[] = [];
   private ray = new THREE.Raycaster();
   private halo: THREE.Mesh;
   private box: THREE.BoxHelper;
   private preview: THREE.Line;
+  private dims: THREE.Sprite;
   private group = new THREE.Group();
   private counter = 0;
   private lastHover = 0;
+  private drag: { id: string; start: Structure; from: THREE.Vector3; moved: boolean } | null = null;
 
   constructor(private o: EditorOpts) {
     this.group.name = 'editor';
     this.halo = new THREE.Mesh(
       new THREE.CylinderGeometry(1, 1, 1, 24, 1, true),
-      new THREE.MeshBasicMaterial({ color: '#4fd1c5', wireframe: true, transparent: true, opacity: 0.55, depthTest: false })
+      new THREE.MeshBasicMaterial({ color: TEAL, wireframe: true, transparent: true, opacity: 0.55, depthTest: false })
     );
     this.halo.visible = false;
     this.halo.renderOrder = 10;
-    this.box = new THREE.BoxHelper(new THREE.Object3D(), '#4fd1c5');
+    this.box = new THREE.BoxHelper(new THREE.Object3D(), TEAL);
     this.box.visible = false;
     (this.box.material as THREE.LineBasicMaterial).depthTest = false;
-    this.preview = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: '#4fd1c5', depthTest: false }));
+    this.preview = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: TEAL, depthTest: false }));
     this.preview.visible = false;
     this.preview.renderOrder = 10;
-    this.group.add(this.halo, this.box, this.preview);
+    this.dims = new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true, depthTest: false }));
+    this.dims.visible = false;
+    this.dims.renderOrder = 11;
+    this.group.add(this.halo, this.box, this.preview, this.dims);
     o.scene.add(this.group);
     this.ray.params.Line = { threshold: 0.6 };
     this.wire();
@@ -99,21 +134,37 @@ export class Editor {
   restore() {
     const pack = this.o.pack();
     if (!pack) return;
+    const have = new Set(pack.edits.features.map(f => String(f.properties.id)));
+    const keep = (list: Feature[]) => list.filter(f => f && f.properties && !have.has(String(f.properties.id)));
     try {
       const raw = localStorage.getItem(KEY(pack.manifest.id));
-      const list = raw ? (JSON.parse(raw) as Feature[]) : [];
-      const have = new Set(pack.edits.features.map(f => String(f.properties.id)));
-      this.edits = list.filter(f => f && f.properties && !have.has(String(f.properties.id)));
-    } catch { this.edits = []; }
-    if (this.edits.length) this.o.rebuild(this.edits);
+      const stored = raw ? JSON.parse(raw) : null;
+      if (Array.isArray(stored)) { this.edits = keep(stored); }                              // v0.5 kept a bare list
+      else if (stored && typeof stored === 'object') {
+        this.edits = keep(Array.isArray(stored.edits) ? stored.edits : []);
+        this.structures = Array.isArray(stored.structures) ? stored.structures : [];
+        const p = stored.proposed;
+        this.proposed = { edits: keep(p && Array.isArray(p.edits) ? p.edits : []), structures: p && Array.isArray(p.structures) ? p.structures : [] };
+      }
+    } catch { this.edits = []; this.structures = []; }
+    if (this.edits.length || this.structures.length || this.proposed.edits.length || this.proposed.structures.length) this.redraw();
     this.o.onChange(this);
   }
 
+  /** everything drawn on top of what is known: what was proposed, then what is still unsaved */
+  private redraw() {
+    this.o.rebuild(this.proposed.edits.concat(this.edits), this.proposed.structures.concat(this.structures));
+  }
+
+  get unsaved(): number { return this.edits.length + this.structures.length; }
+
   setActive(on: boolean) {
     if (on === this.active) return;
+    if (on && !this.o.caps().edit) { this.said(false, 'editing needs a builder or admin PIN'); return; }
     this.active = on;
     this.o.player.editing = on;
     this.o.dom.style.cursor = on ? 'crosshair' : '';
+    this.o.grid.visible = on;
     if (!on) { this.cancel(); this.select(null); this.setHover(null); }
     this.o.onChange(this);
   }
@@ -129,8 +180,22 @@ export class Editor {
   cancel() {
     this.moving = null;
     this.drawing = [];
+    this.drag = null;
     this.preview.visible = false;
     this.o.onChange(this);
+  }
+
+  /** redraw the panel and the buttons after something outside changed (the role, say) */
+  refresh() { this.o.onChange(this); }
+
+  /** the metre grid on the ground, on or off (V) */
+  toggleGrid() { this.o.grid.visible = !this.o.grid.visible; this.o.onChange(this); }
+
+  /** each frame: the grid follows whoever is looking, or the thing they are holding */
+  frame() {
+    if (!this.active) return;
+    const p = this.selection && this.selection.kind === 'structure' ? this.centroid(this.selection.structure) : this.o.player.position;
+    if (p) this.o.grid.update(p.x, p.z);
   }
 
   // ---- picking ---------------------------------------------------------------------------------
@@ -172,7 +237,7 @@ export class Editor {
   pick(clientX: number, clientY: number): Pick | null {
     const pack = this.o.pack();
     const ray = this.rayAt(clientX, clientY);
-    const targets: THREE.Object3D[] = [...this.o.vegetation.recordMeshes, this.o.today.group];
+    const targets: THREE.Object3D[] = [...this.o.vegetation.recordMeshes, this.o.today.group, this.o.structures.group];
     const hits = ray.intersectObjects(targets, true);
     const groundPoint = this.ground(ray.ray);
     const groundDist = groundPoint ? groundPoint.distanceTo(ray.ray.origin) : Infinity;
@@ -184,7 +249,7 @@ export class Editor {
         if (idx != null && pack.trees[idx]) return { kind: 'tree', index: idx, tree: pack.trees[idx], point: hit.point };
         continue;
       }
-      // walk up to the named marker / line / building
+      // walk up to the named marker / line / building / structure
       let o: THREE.Object3D | null = obj;
       while (o && !o.name && o.parent) o = o.parent;
       if (!o || !o.name) continue;
@@ -193,6 +258,10 @@ export class Editor {
       if (type === 'note') return { kind: 'note', id, name: this.noteName(id), object: o, point: hit.point };
       if (type === 'line') return { kind: 'line', id, object: o, point: hit.point };
       if (type === 'today') return { kind: 'building', name: id, object: o, point: hit.point };
+      if (type === 'massing' || type === 'model' || type === 'plan' || type === 'site') {
+        const s = this.structure(id);
+        if (s) return { kind: 'structure', id, structure: s, object: o, point: hit.point };
+      }
     }
     if (groundPoint) {
       const ll = this.o.frame.toLngLat(groundPoint.x, groundPoint.z);
@@ -210,11 +279,58 @@ export class Editor {
     return String(f?.properties.name || id);
   }
 
+  // ---- structures: what is where, right now --------------------------------------------------------
+  /** a structure as it currently stands: the unsaved change, else the proposed one, else the registry's row */
+  structure(id: string): Structure | null {
+    const pending = this.structures.find(s => s.id === id) ?? this.proposed.structures.find(s => s.id === id);
+    if (pending) return pending.remove ? null : pending;
+    return this.o.structuresBase().find(s => s.id === id) ?? null;
+  }
+
+  /** the footprint's centre in world metres */
+  centroid(s: Structure): THREE.Vector3 | null {
+    if (s.position) { const w = this.o.frame.toWorld(s.position[0], s.position[1]); return new THREE.Vector3(w.x, this.o.field.atOr(s.position[0], s.position[1], 0), w.z); }
+    if (!s.outline || !s.outline.length) return null;
+    const ring = this.ring(s.outline);
+    const c = ring.reduce((a, p) => a.add(p), new THREE.Vector3()).multiplyScalar(1 / ring.length);
+    const ll = this.o.frame.toLngLat(c.x, c.z);
+    c.y = this.o.field.atOr(ll.lng, ll.lat, 0);
+    return c;
+  }
+
+  private ring(outline: [number, number][]): THREE.Vector3[] {
+    const pts = outline.map(([lng, lat]) => { const w = this.o.frame.toWorld(lng, lat); return new THREE.Vector3(w.x, 0, w.z); });
+    if (pts.length > 1 && pts[0].distanceTo(pts[pts.length - 1]) < 1e-6) pts.pop();     // closed rings repeat the first point
+    return pts;
+  }
+
+  private outlineFrom(ring: THREE.Vector3[]): [number, number][] {
+    const out = ring.map(p => { const ll = this.o.frame.toLngLat(p.x, p.z); return [ll.lng, ll.lat] as [number, number]; });
+    out.push(out[0]);
+    return out;
+  }
+
+  /** the footprint read along its own first edge: width × depth in metres, and the height */
+  dimensions(s: Structure): { w: number; d: number; h: number } {
+    const h = s.status === 'massing' ? (s.heightFt ?? 20) * FT : s.status === 'model' ? 0 : 0;
+    if (!s.outline || s.outline.length < 3) return { w: 0, d: 0, h };
+    const ring = this.ring(s.outline);
+    const u = new THREE.Vector3().subVectors(ring[1], ring[0]).setY(0).normalize();
+    const v = new THREE.Vector3(-u.z, 0, u.x);
+    let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+    for (const p of ring) {
+      const a = p.dot(u), b = p.dot(v);
+      u0 = Math.min(u0, a); u1 = Math.max(u1, a); v0 = Math.min(v0, b); v1 = Math.max(v1, b);
+    }
+    return { w: u1 - u0, d: v1 - v0, h };
+  }
+
   // ---- the visuals -----------------------------------------------------------------------------
   private setHover(p: Pick | null) {
     this.hover = p;
     this.halo.visible = false;
     this.box.visible = false;
+    this.dims.visible = false;
     const shown = this.selection && this.selection.kind !== 'ground' ? this.selection : p;
     if (!shown) return;
     if (shown.kind === 'tree') {
@@ -228,7 +344,42 @@ export class Editor {
     } else if (shown.kind !== 'ground') {
       this.box.setFromObject(shown.object);
       this.box.visible = true;
+      if (shown.kind === 'structure') this.showDims(shown.structure);
     }
+  }
+
+  private showDims(s: Structure) {
+    const c = this.centroid(s);
+    if (!c) return;
+    const { w, d, h } = this.dimensions(s);
+    const ft = (m: number) => Math.round(m / FT);
+    const text = s.status === 'model'
+      ? `${s.name} · model${s.rotationDeg ? ` · ${s.rotationDeg}°` : ''}${s.altitudeM ? ` · ${s.altitudeM > 0 ? '+' : ''}${s.altitudeM.toFixed(2)} m` : ''}`
+      : `${w.toFixed(1)} × ${d.toFixed(1)} m  (${ft(w)} × ${ft(d)} ft)${h ? ` · ${h.toFixed(1)} m high` : ''}`;
+    const tex = this.labelTexture(text);
+    const old = this.dims.material.map;
+    this.dims.material.map = tex;
+    this.dims.material.needsUpdate = true;
+    old?.dispose();
+    this.dims.scale.set(Math.max(6, text.length * 0.42), 1.5, 1);
+    this.dims.position.set(c.x, c.y + h + 2.2, c.z);
+    this.dims.visible = true;
+  }
+
+  private labelTexture(text: string): THREE.CanvasTexture {
+    const c = document.createElement('canvas');
+    c.width = 768; c.height = 96;
+    const g = c.getContext('2d')!;
+    g.fillStyle = 'rgba(12,16,14,0.85)';
+    g.beginPath(); g.roundRect(0, 0, c.width, c.height, 22); g.fill();
+    g.strokeStyle = TEAL; g.lineWidth = 4; g.stroke();
+    g.fillStyle = '#f2efe6';
+    g.font = '600 40px -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif';
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(text, c.width / 2, c.height / 2);
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
   }
 
   select(p: Pick | null) {
@@ -242,11 +393,26 @@ export class Editor {
     const d = this.o.dom;
     d.addEventListener('pointermove', e => {
       if (!this.active) return;
+      if (this.drag) { this.dragTo(e.clientX, e.clientY); return; }
       const now = performance.now();
       if (now - this.lastHover < 60) return;         // the pick is not free; fifteen a second is plenty
       this.lastHover = now;
       if (this.drawing.length) { const g = this.ground(this.rayAt(e.clientX, e.clientY).ray); this.previewLine(g); }
       this.setHover(this.pick(e.clientX, e.clientY));
+    });
+    d.addEventListener('pointerdown', e => {
+      if (!this.active || e.button !== 0 || this.tool !== 'select' || this.moving || !this.o.caps().place) return;
+      const p = this.pick(e.clientX, e.clientY);
+      if (p && p.kind === 'structure') {
+        const g = this.ground(this.rayAt(e.clientX, e.clientY).ray);
+        if (g) { this.drag = { id: p.id, start: JSON.parse(JSON.stringify(p.structure)), from: g, moved: false }; d.setPointerCapture?.(e.pointerId); }
+      }
+    });
+    d.addEventListener('pointerup', () => {
+      if (!this.drag) return;
+      const was = this.drag;
+      this.drag = null;
+      if (was.moved) { this.snapshot(); this.selectStructure(was.id); this.persist(); this.o.onChange(this); }
     });
     d.addEventListener('click', e => {
       if (!this.active || e.button !== 0) return;
@@ -264,12 +430,18 @@ export class Editor {
       else if (k === 'backspace' && this.drawing.length) { this.drawing.pop(); this.previewLine(null); this.o.onChange(this); }
       else if (k === 'z' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); this.undo(); }
       else if (k === 'delete' && this.selection) { this.remove(this.selection); }
+      else if (k === 'v') this.toggleGrid();
+      else if (k === '[' && this.selection?.kind === 'structure') this.rotateStructure(this.selection.id, -SNAP_DEG);
+      else if (k === ']' && this.selection?.kind === 'structure') this.rotateStructure(this.selection.id, SNAP_DEG);
+      else if ((k === '+' || k === '=') && this.selection?.kind === 'structure') this.raiseStructure(this.selection.id, 0.25);
+      else if ((k === '-' || k === '_') && this.selection?.kind === 'structure') this.raiseStructure(this.selection.id, -0.25);
       else if (k === '1') this.setTool('select');
       else if (k === '2') this.setTool('marker');
       else if (k === '3') this.setTool('tree');
       else if (k === '4') this.setTool('fence');
       else if (k === '5') this.setTool('path');
       else if (k === '6') this.setTool('road');
+      else if (k === '7') this.setTool('block');
     });
   }
 
@@ -285,10 +457,30 @@ export class Editor {
       case 'select': this.select(p); break;
       case 'marker': if (p.kind === 'ground') this.promptNote(p.lng, p.lat); break;
       case 'tree': if (p.kind === 'ground') this.promptTree(p.lng, p.lat); break;
+      case 'block': if (p.kind === 'ground' && this.o.caps().place) this.addBlock(p.lng, p.lat, this.block, this.o.player.state().headingDeg); break;
       case 'fence': case 'path': case 'road':
         if (p.kind === 'ground') { this.drawing.push([p.lng, p.lat]); this.previewLine(null); this.o.onChange(this); }
         break;
     }
+  }
+
+  // ---- history ---------------------------------------------------------------------------------------
+  /** remember the state before a change, so undo can bring it back */
+  private snapshot() {
+    this.history.push({ edits: JSON.parse(JSON.stringify(this.edits)), structures: JSON.parse(JSON.stringify(this.structures)) });
+    if (this.history.length > 100) this.history.shift();
+  }
+
+  undo() {
+    const s = this.history.pop();
+    if (!s) return;
+    this.edits = s.edits;
+    this.structures = s.structures;
+    this.persist();
+    this.redraw();
+    this.select(null);
+    this.setHover(null);
+    this.o.onChange(this);
   }
 
   // ---- the edits themselves --------------------------------------------------------------------
@@ -297,9 +489,10 @@ export class Editor {
   }
 
   private commit(f: Feature) {
+    this.snapshot();
     this.edits.push(f);
     this.persist();
-    this.o.rebuild(this.edits);
+    this.redraw();
     this.select(null);
     this.setHover(null);
     this.o.onChange(this);
@@ -327,13 +520,15 @@ export class Editor {
   beginMove(id: string, name: string) { this.moving = { id, name }; this.o.onChange(this); }
 
   moveVision(id: string, lng: number, lat: number) {
+    this.snapshot();
     // one move per project in a session: a second move replaces the first
     this.edits = this.edits.filter(f => !(f.properties.op === 'move' && f.properties.layer === 'vision' && f.properties.target === id));
     this.moving = null;
+    this.history.pop();   // commit takes its own snapshot; keep one step per move
     this.commit({ type: 'Feature', properties: this.stamp({ op: 'move', layer: 'vision', target: id }), geometry: { type: 'Point', coordinates: [lng, lat] } });
   }
 
-  /** remove whatever is selected: a tree is marked gone; a project is taken off; a session note or line is dropped */
+  /** remove whatever is selected: a tree is marked gone; a project is taken off; a session note or line is dropped; a structure is taken off the registry */
   remove(p: Pick) {
     if (p.kind === 'tree') this.markGone(p.tree);
     else if (p.kind === 'vision') {
@@ -343,19 +538,10 @@ export class Editor {
     }
     else if (p.kind === 'note' || p.kind === 'line') {
       const before = this.edits.length;
-      this.edits = this.edits.filter(f => String(f.properties.id) !== p.id);
-      if (this.edits.length !== before) { this.persist(); this.o.rebuild(this.edits); this.select(null); this.setHover(null); this.o.onChange(this); }
+      const next = this.edits.filter(f => String(f.properties.id) !== p.id);
+      if (next.length !== before) { this.snapshot(); this.edits = next; this.persist(); this.redraw(); this.select(null); this.setHover(null); this.o.onChange(this); }
     }
-  }
-
-  undo() {
-    if (!this.edits.length) return;
-    this.edits.pop();
-    this.persist();
-    this.o.rebuild(this.edits);
-    this.select(null);
-    this.setHover(null);
-    this.o.onChange(this);
+    else if (p.kind === 'structure') this.removeStructure(p.id);
   }
 
   private promptNote(lng: number, lat: number) {
@@ -389,11 +575,156 @@ export class Editor {
     this.addLine(kind, coords, name);
   }
 
+  // ---- structures: placing at real size -----------------------------------------------------------
+  /** record a change to a structure (the whole row, as the atlas will hold it) */
+  private change(row: StructureChange) {
+    this.snapshot();
+    this.structures = this.structures.filter(s => s.id !== row.id).concat([row]);
+    this.persist();
+    this.redraw();
+    this.selectStructure(row.id);
+    this.o.onChange(this);
+  }
+
+  /** after a redraw the old object is gone; find the new one for the same id */
+  private selectStructure(id: string) {
+    const s = this.structure(id);
+    const obj = s ? (this.o.structures.group.getObjectByName(`massing:${id}`) ?? this.o.structures.group.getObjectByName(`model:${id}`) ?? this.o.structures.group.getObjectByName(`plan:${id}`) ?? this.o.structures.group.getObjectByName(`site:${id}`)) : null;
+    if (s && obj) { const c = this.centroid(s) ?? new THREE.Vector3(); this.select({ kind: 'structure', id, structure: s, object: obj, point: c }); }
+    else this.select(null);
+  }
+
+  /** a block of so many metres, put down at a point and turned to a heading, as a massing structure */
+  addBlock(lng: number, lat: number, spec: BlockSpec, headingDeg = 0) {
+    const w = Math.max(0.5, spec.w), d = Math.max(0.5, spec.d), h = Math.max(0.5, spec.h);
+    const c = this.o.frame.toWorld(lng, lat);
+    const cs = new THREE.Vector3(Math.round(c.x / SNAP_M) * SNAP_M, 0, Math.round(c.z / SNAP_M) * SNAP_M);
+    const a = -headingDeg * Math.PI / 180;      // world x is east, z is south; a heading turns clockwise from north
+    const corners = [[-w / 2, -d / 2], [w / 2, -d / 2], [w / 2, d / 2], [-w / 2, d / 2]].map(([x, z]) =>
+      new THREE.Vector3(cs.x + x * Math.cos(a) - z * Math.sin(a), 0, cs.z + x * Math.sin(a) + z * Math.cos(a)));
+    const id = `b-${Date.now().toString(36)}-${(this.counter++).toString(36)}`;
+    this.change({
+      id, pid: this.o.pid(), mode: 'vision', name: spec.name || 'block', status: 'massing',
+      outline: this.outlineFrom(corners), heightFt: Math.round(h / FT * 10) / 10, note: 'placed in the world'
+    });
+    return id;
+  }
+
+  /** move a structure by so many metres east and south, snapped to the half metre */
+  moveStructure(id: string, dx: number, dz: number, snap = true) {
+    const s = this.structure(id);
+    if (!s) return;
+    const row: StructureChange = JSON.parse(JSON.stringify(s));
+    if (row.outline) {
+      const ring = this.ring(row.outline);
+      const c = ring.reduce((acc, p) => acc.add(p), new THREE.Vector3()).multiplyScalar(1 / ring.length);
+      let tx = c.x + dx, tz = c.z + dz;
+      if (snap) { tx = Math.round(tx / SNAP_M) * SNAP_M; tz = Math.round(tz / SNAP_M) * SNAP_M; }
+      const off = new THREE.Vector3(tx - c.x, 0, tz - c.z);
+      row.outline = this.outlineFrom(ring.map(p => p.clone().add(off)));
+    }
+    if (row.position) {
+      const wpos = this.o.frame.toWorld(row.position[0], row.position[1]);
+      let tx = wpos.x + dx, tz = wpos.z + dz;
+      if (snap) { tx = Math.round(tx / SNAP_M) * SNAP_M; tz = Math.round(tz / SNAP_M) * SNAP_M; }
+      const ll = this.o.frame.toLngLat(tx, tz);
+      row.position = [ll.lng, ll.lat];
+    }
+    this.change(row);
+  }
+
+  /** turn a structure about its centre, in steps of fifteen degrees */
+  rotateStructure(id: string, deg: number) {
+    const s = this.structure(id);
+    if (!s) return;
+    const row: StructureChange = JSON.parse(JSON.stringify(s));
+    if (row.outline) {
+      const ring = this.ring(row.outline);
+      const c = ring.reduce((acc, p) => acc.add(p), new THREE.Vector3()).multiplyScalar(1 / ring.length);
+      const a = deg * Math.PI / 180;
+      row.outline = this.outlineFrom(ring.map(p => {
+        const x = p.x - c.x, z = p.z - c.z;
+        return new THREE.Vector3(c.x + x * Math.cos(a) - z * Math.sin(a), 0, c.z + x * Math.sin(a) + z * Math.cos(a));
+      }));
+    }
+    if (row.status === 'model') row.rotationDeg = ((Math.round(((row.rotationDeg ?? 0) + deg) / SNAP_DEG) * SNAP_DEG) % 360 + 360) % 360;
+    this.change(row);
+  }
+
+  /** lift or sink a model, in quarter metres (a block sits on the ground and cannot) */
+  raiseStructure(id: string, dm: number) {
+    const s = this.structure(id);
+    if (!s || s.status !== 'model') return;
+    const row: StructureChange = JSON.parse(JSON.stringify(s));
+    row.altitudeM = Math.round(((row.altitudeM ?? 0) + dm) * 100) / 100;
+    this.change(row);
+  }
+
+  /** a block's height, in metres */
+  setHeight(id: string, metres: number) {
+    const s = this.structure(id);
+    if (!s || s.status !== 'massing' || !isFinite(metres) || metres < 0.5 || metres > 90) return;
+    const row: StructureChange = JSON.parse(JSON.stringify(s));
+    row.heightFt = Math.round(metres / FT * 10) / 10;
+    this.change(row);
+  }
+
+  /** the structure's name */
+  rename(id: string, name: string) {
+    const s = this.structure(id);
+    if (!s || !name.trim()) return;
+    const row: StructureChange = JSON.parse(JSON.stringify(s));
+    row.name = name.trim().slice(0, 120);
+    this.change(row);
+  }
+
+  /** take a structure off the registry: a block placed here and never saved simply vanishes; a registered one is a removal to propose */
+  removeStructure(id: string) {
+    const known = this.o.structuresBase().some(s => s.id === id) || this.proposed.structures.some(s => s.id === id);
+    this.snapshot();
+    this.structures = this.structures.filter(s => s.id !== id);
+    if (known) this.structures.push({ id, pid: this.o.pid(), mode: 'vision', name: id, status: 'site', remove: true });
+    this.persist();
+    this.redraw();
+    this.select(null);
+    this.setHover(null);
+    this.o.onChange(this);
+  }
+
+  /** while the button is down: the structure follows the cursor across the ground */
+  private dragTo(clientX: number, clientY: number) {
+    if (!this.drag) return;
+    const g = this.ground(this.rayAt(clientX, clientY).ray);
+    if (!g) return;
+    const dx = g.x - this.drag.from.x, dz = g.z - this.drag.from.z;
+    if (!this.drag.moved && Math.hypot(dx, dz) < 0.25) return;
+    this.drag.moved = true;
+    // move from the start, not from the last frame, so the snap never walks
+    const start = this.drag.start;
+    const row: StructureChange = JSON.parse(JSON.stringify(start));
+    if (row.outline) {
+      const ring = this.ring(row.outline);
+      const c = ring.reduce((acc, p) => acc.add(p), new THREE.Vector3()).multiplyScalar(1 / ring.length);
+      const tx = Math.round((c.x + dx) / SNAP_M) * SNAP_M, tz = Math.round((c.z + dz) / SNAP_M) * SNAP_M;
+      const off = new THREE.Vector3(tx - c.x, 0, tz - c.z);
+      row.outline = this.outlineFrom(ring.map(p => p.clone().add(off)));
+    }
+    if (row.position) {
+      const wpos = this.o.frame.toWorld(row.position[0], row.position[1]);
+      const ll = this.o.frame.toLngLat(Math.round((wpos.x + dx) / SNAP_M) * SNAP_M, Math.round((wpos.z + dz) / SNAP_M) * SNAP_M);
+      row.position = [ll.lng, ll.lat];
+    }
+    // drawn live, without a history entry each frame: the snapshot is taken once, on release
+    this.structures = this.structures.filter(s => s.id !== row.id).concat([row]);
+    this.redraw();
+    this.selectStructure(row.id);
+  }
+
   // ---- keeping and saving ----------------------------------------------------------------------
   private persist() {
     const pack = this.o.pack();
     if (!pack) return;
-    try { localStorage.setItem(KEY(pack.manifest.id), JSON.stringify(this.edits)); } catch { /* private mode: the edits live for the session */ }
+    try { localStorage.setItem(KEY(pack.manifest.id), JSON.stringify({ edits: this.edits, structures: this.structures, proposed: this.proposed })); } catch { /* private mode: the edits live for the session */ }
   }
 
   /** the unsaved edits as a file the pack would accept as its edits layer */
@@ -411,31 +742,43 @@ export class Editor {
   }
 
   /**
-   * Commit the unsaved edits to the pack through the atlas.
+   * Send the unsaved work to the atlas as a proposal.
    *
    *   The atlas holds the PIN and the token; the world only ever sends the PIN it was given and the
-   *   features. On success the features become part of the pack's own edits layer here, so what
-   *   is drawn does not change, and the unsaved list is empty.
+   *   changes. An admin's proposal is applied at once, and the changes become part of what is known
+   *   here — the pack's edits layer, the registry — so nothing drawn changes. A builder's proposal
+   *   waits for an admin: the changes stay drawn, marked as proposed, and the unsaved list is empty.
    */
-  async save(pin: string): Promise<{ ok: boolean; message: string }> {
+  async save(pin: string, note = ''): Promise<{ ok: boolean; message: string }> {
     const pack = this.o.pack();
     if (!pack) return this.said(false, 'no pack loaded');
-    if (!this.edits.length) return this.said(true, 'nothing to save');
+    if (!this.unsaved) return this.said(true, 'nothing to save');
     try {
-      const r = await fetch(`${this.o.atlas}/api/pack/edits`, {
+      const r = await fetch(`${this.o.atlas}/api/pack/proposals`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin, pack: pack.manifest.id, features: this.edits })
+        body: JSON.stringify({ pin, pack: pack.manifest.id, note, edits: this.edits, structures: this.structures })
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok || !j.ok) {
-        const why = j.error === 'bad_pin' ? 'wrong PIN' : j.error === 'not_configured' ? 'the atlas has no token for this pack yet' : (j.error || `HTTP ${r.status}`);
+        const why = j.error === 'bad_pin' ? 'wrong PIN' : j.error === 'not_configured' ? 'the atlas has no token for this pack yet' : j.error === 'github_error' ? `the atlas could not commit (${j.detail ? String(j.detail).slice(0, 80) : 'GitHub refused'})` : (j.error || `HTTP ${r.status}`);
         return this.said(false, `not saved: ${why}`);
       }
-      pack.edits.features.push(...this.edits);
+      const n = this.unsaved;
+      if (j.applied) {
+        pack.edits.features.push(...this.edits);
+        const base = this.o.structuresBase();
+        base.splice(0, base.length, ...mergeChanges(base, this.structures));
+      } else {
+        this.proposed = { edits: this.proposed.edits.concat(this.edits), structures: this.proposed.structures.concat(this.structures) };
+      }
       this.edits = [];
+      this.structures = [];
+      this.history = [];
       this.persist();
-      this.o.rebuild(this.edits);
-      return this.said(true, `saved ${j.count ?? ''} to the pack${j.commit ? ` · ${String(j.commit).slice(0, 7)}` : ''}`);
+      this.redraw();
+      return this.said(true, j.applied
+        ? `saved ${n} to the pack${j.commit ? ` · ${String(j.commit).slice(0, 7)}` : ''}`
+        : `proposed ${n} · waiting for an admin${j.id ? ` · ${j.id}` : ''}`);
     } catch (e) {
       return this.said(false, `not saved: ${(e as Error).message}`);
     }
@@ -447,3 +790,4 @@ export class Editor {
     return { ok, message };
   }
 }
+

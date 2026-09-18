@@ -66,12 +66,27 @@ place a photograph was taken); draw a fence, a path, a road. Tools on **1–6**,
 line, **Esc** cancels, **Ctrl Z** undoes. In edit mode the left button selects and places and the
 right button looks around.
 
+**Blocks, at real size.** Tool **7** puts down a block — so many metres by so many, so high — facing
+the way you face, on a metre grid that lies on the hillside (**V** shows it anywhere). Drag it to
+move it (it snaps to the half metre), **[ ]** turn it in fifteen-degree steps, set its height, read
+its footprint in metres and feet off the label over it. The atlas's designed structures (its
+reserved sites, massing blocks and `.glb` models) are picked and moved the same way. A block is a
+row of the atlas's `data/structures.json`, so what is placed here is what the atlas plans.
+
+**Three roles.** A *member* walks, flies and reads — click a post, a building, a block, and a card
+says what it is. A *builder* has every tool, and what a builder saves is a **proposal** that waits
+for an admin. An *admin* saves at once and decides the proposals. The role comes from a PIN the
+atlas checks (`POST /api/pack/role`); the table of who-may-what is `world/roles.ts`, one place,
+so a wallet or a Holochain agent key can replace the PIN later without touching a gate.
+
 Every edit is one feature of the pack's own `edits.geojson` grammar (`op` × `layer`: remove or add
 trees, move or remove a project, add a marker, add a line), applied on top of the record the moment
 it is made, kept in the browser until it is saved, and downloadable as `edits.geojson`. **Save to
-pack…** sends them with the owner's PIN to the atlas's `POST /api/pack/edits`, which validates
-each one and commits the merged layer to the pack's repository. The record itself is never
-rewritten: the lidar's 3,663 trees stay in `trees.csv`; the edit is what takes one down.
+pack…** (or **propose…**) sends the edits and the structure changes with the PIN to the atlas's
+`POST /api/pack/proposals`, which validates each one, records the proposal in git, and — for an
+admin, or once an admin approves — commits the merged edits layer to the pack's repository and the
+merged registry to the atlas's. The record itself is never rewritten: the lidar's 3,663 trees stay
+in `trees.csv`; the edit is what takes one down.
 
 ## How it is put together
 
@@ -150,11 +165,13 @@ draws: reserved ground, a massing block, or a real `.glb`. The glTF loader is im
 there is a model to load.
 
 **`edit/editor.ts`** — the pencil. Picking is a raycast against the record's instanced trees (the
-instance id maps back to the row of the record) and the standing things, and for the ground a march
-along the ray against the height function, which is exact and needs no mesh. Every action is one
-edit feature with its own id, `by: owner`, and the date; undo pops the last; the unsaved list lives
-in `localStorage` per pack and comes back on reload, minus anything the pack has since taken in.
-**`edit/panel.ts`** is the view of it.
+instance id maps back to the row of the record), the standing things and the structures, and for the
+ground a march along the ray against the height function, which is exact and needs no mesh. Every
+action is one edit feature with its own id, `by: owner`, and the date, or one structure change (a
+whole row, or an id to remove); undo steps back through snapshots; the unsaved work lives in
+`localStorage` per pack and comes back on reload, minus anything the pack has since taken in.
+**`edit/panel.ts`** is the view of it; **`edit/grid.ts`** the metre raster on the ground;
+**`ui/inspect.ts`** the member's card; **`world/roles.ts`** the table of who may do what.
 
 ## Testing
 
@@ -168,9 +185,9 @@ generated on the spot by `tests/fixture.mjs` — no binaries in the repo, nothin
 ## Looking at a pack
 
 `PACK_DIR=../sulphur-mountain-world node tests/serve.mjs` serves a pack from disk at
-`/realpack/`, and `node scripts/shot.mjs "<url>" out.png [lng,lat,heading] [first|third|fly|edit]`
+`/realpack/`, and `node scripts/shot.mjs "<url>" out.png [lng,lat,heading] [first|third|fly|edit|place]`
 boots the built world against it headless and writes a screenshot — `fly` from 50 m up, `edit` with
-the editor open and a marker, a fence and a path already drawn.
+the editor open and a marker, a fence and a path already drawn, `place` with a block on the grid.
 
 ## What is next
 
@@ -183,8 +200,12 @@ the editor open and a marker, a fence and a path already drawn.
   land's own grain.
 - **The house.** The new build as a `.glb`, sited from the surveyed line and never from the county
   ring, in the atlas's registry so it appears here the moment it is placed there.
-- **More to edit.** Buildings that are gone or new (a footprint drawn on the ground with a height),
-  a tree's real height, a photograph pinned to its marker.
+- **The magic box.** A marker you talk to: text and voice in, an agent that proposes edits at that
+  spot through the same grammar, for you to confirm.
+- **Territories and terrain.** Zone polygons drawn on the ground; a pad flattened, ground raised or
+  lowered, with everything that asks the height function following.
+- **Construction.** Walls as lines and curves with height and thickness, floors, roofs, openings —
+  the house built element by element, at real size, and walked through.
 - **Real collision.** three-mesh-bvh against the models once there are models.
 - **Presence.** Seeing each other: position, heading and animation state at about 10 Hz.
 

@@ -53,6 +53,7 @@ const send = (res, code, body, type) => {
 };
 
 export const FIXTURE_PIN = '4242';
+export const BUILDER_PIN = '2424';
 
 export function start(port = PORT) {
   const server = createServer(async (req, res) => {
@@ -68,6 +69,32 @@ export function start(port = PORT) {
       }
       if (p.startsWith('/api/structures')) {
         return send(res, 200, JSON.stringify(STRUCTURES), TYPES['.json']);
+      }
+      // the atlas's role check: two PINs the fixture knows
+      if (p === '/api/pack/role' && req.method === 'POST') {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        let body = {};
+        try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { body = {}; }
+        const role = body.pin === FIXTURE_PIN ? 'admin' : body.pin === BUILDER_PIN ? 'builder' : null;
+        if (!role) return send(res, 401, JSON.stringify({ ok: false, error: 'bad_pin' }), TYPES['.json']);
+        return send(res, 200, JSON.stringify({ ok: true, role }), TYPES['.json']);
+      }
+      // the atlas's proposals endpoint, as the world sees it: an admin's is applied, a builder's waits
+      if (p === '/api/pack/proposals' && req.method === 'POST') {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        let body = {};
+        try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return send(res, 400, JSON.stringify({ ok: false, error: 'bad_json' }), TYPES['.json']); }
+        const role = body.pin === FIXTURE_PIN ? 'admin' : body.pin === BUILDER_PIN ? 'builder' : null;
+        if (!role) return send(res, 401, JSON.stringify({ ok: false, error: 'bad_pin' }), TYPES['.json']);
+        if (body.pack !== 'fixture-pack') return send(res, 404, JSON.stringify({ ok: false, error: 'unknown_pack' }), TYPES['.json']);
+        const E = Array.isArray(body.edits) ? body.edits : [], S = Array.isArray(body.structures) ? body.structures : [];
+        if (!E.length && !S.length) return send(res, 400, JSON.stringify({ ok: false, error: 'no_changes' }), TYPES['.json']);
+        const id = 'p-' + (server.proposals.length + 1).toString(36) + '-test';
+        server.proposals.push({ id, by: role, note: body.note || '', status: role === 'admin' ? 'approved' : 'pending', edits: E, structures: S });
+        if (role === 'admin') server.saved.push(...E);
+        return send(res, 200, JSON.stringify({ ok: true, id, applied: role === 'admin', status: role === 'admin' ? 'approved' : 'pending', count: E.length + S.length, commit: role === 'admin' ? 'f1x7ur3000000' : undefined }), TYPES['.json']);
       }
       // the atlas's save endpoint, as the world sees it: the PIN is checked, the features are kept
       if (p === '/api/pack/edits' && req.method === 'POST') {
@@ -117,6 +144,8 @@ export function start(port = PORT) {
   });
   /** what the mock atlas has been asked to commit */
   server.saved = [];
+  /** every proposal the mock atlas received */
+  server.proposals = [];
   return new Promise(resolve => server.listen(port, () => resolve(server)));
 }
 

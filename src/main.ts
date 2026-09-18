@@ -9,8 +9,9 @@
 //        &pack=<url of a data pack, or 0 for none>&far=<a coarse terrain template for the horizon, or 0>
 //
 //   G flies (god mode: anywhere, any height); B edits. Edits are features of the pack's own edits
-//   layer, drawn on top of the record the moment they are made, kept in the browser until they are
-//   saved to the pack through the atlas with the owner's PIN.
+//   layer, or changes to the atlas's registry of structures, drawn the moment they are made and kept
+//   in the browser until they go to the atlas as a proposal. Who may do what is a ROLE — member,
+//   builder, admin — from a PIN the atlas checks; the table is in world/roles.ts.
 //
 //   A community may also have a PACK — one repository of that property's ground truth (the
 //   surveyed line, the roofs the lidar measured, every tree it saw, the road, the placed zones).
@@ -32,6 +33,10 @@ import { Today, type TodayTiles } from './world/today';
 import { loadGrain, loadTile } from './world/grain';
 import { Editor } from './edit/editor';
 import { Panel } from './edit/panel';
+import { GroundGrid } from './edit/grid';
+import { Inspect } from './ui/inspect';
+import { CAPS, loadSession, saveSession, roleFor, type Session } from './world/roles';
+import { mergeChanges, type Structure, type StructureChange } from './world/structures';
 import { Player } from './player/player';
 import { loadAvatar } from './player/avatar';
 import { Hud } from './ui/hud';
@@ -112,8 +117,14 @@ const player = new Player(frame, field, camera, renderer.domElement);
 let pack: PackData | null = null;
 /** the close-up tiles the standing things carry, kept so a rebuild can carry them again */
 let tiles: TodayTiles = {};
+/** the atlas's registry as loaded, before any change made here */
+let structuresBase: Structure[] = [];
+let pid = community.pid;
+let session: Session = loadSession();
+const caps = () => CAPS[session.role];
+const grid = new GroundGrid(frame, field);
 
-scene.add(terrain.group, vegetation.group, structures.group, today.group, player.object);
+scene.add(terrain.group, vegetation.group, structures.group, today.group, player.object, grid.group);
 sky.addTo(scene);
 
 // the clock is the community's own wall time, not the viewer's: a shadow at half past two means
@@ -126,34 +137,68 @@ const hud = new Hud(app, {
   onTime: h => { clockHours = h; applySun(); },
   onView: () => player.toggleView(),
   onRecentre: () => player.placeAt(start.lng, start.lat, start.heading),
-  onFly: () => player.toggleMode(),
-  onEdit: () => editor.toggle()
+  onFly: () => { if (caps().fly) player.toggleMode(); },
+  onEdit: () => editor.toggle(),
+  onRole: () => void signIn()
 });
 
 const editor = new Editor({
-  dom: renderer.domElement, camera, frame, field, player, vegetation, today, scene, atlas,
+  dom: renderer.domElement, camera, frame, field, player, vegetation, today, structures, grid, scene, atlas,
   pack: () => pack,
-  rebuild: extra => rebuild(extra),
+  pid: () => pid,
+  structuresBase: () => structuresBase,
+  caps,
+  rebuild: (edits, changes) => rebuild(edits, changes),
   onChange: () => { panel.render(); hud.setMode(player.mode === 'fly', editor.active); }
 });
-const panel = new Panel(app, editor, () => window.prompt('The atlas PIN, to commit these edits to the pack:'));
+const panel = new Panel(app, editor, {
+  askPin: () => session.pin ?? window.prompt('The atlas PIN:'),
+  role: () => session.role,
+  caps
+});
+const inspect = new Inspect(app, renderer.domElement, editor, () => pack);
+hud.setRole(session.role, caps().edit);
+
+/** the role button: a PIN makes a builder or an admin; a second click signs out */
+async function signIn() {
+  if (session.role !== 'member') {
+    session = { role: 'member', pin: null };
+    saveSession(session);
+    editor.setActive(false);
+    hud.setRole(session.role, caps().edit);
+    editor.refresh();
+    return;
+  }
+  const pin = window.prompt('Your PIN — a builder proposes, an admin decides:');
+  if (!pin) return;
+  const role = await roleFor(atlas, pin.trim());
+  if (!role) { window.alert('That PIN is not known to the atlas.'); return; }
+  session = { role, pin: pin.trim() };
+  saveSession(session);
+  hud.setRole(session.role, caps().edit);
+  editor.refresh();
+}
 
 /**
- * Redraw everything the record and the edits together decide: the trees that stand, the projects
- * where they now are, the markers and the lines. The ground, the sky and the county's buildings
- * are untouched — an edit never reaches them.
+ * Redraw everything the record, the edits and the structure changes together decide: the trees
+ * that stand, the projects where they now are, the markers and the lines, the blocks and the
+ * designed buildings where they now sit. The ground, the sky and the county's buildings are
+ * untouched — an edit never reaches them.
  */
-function rebuild(extra: Feature[]) {
-  if (!pack) return;
-  pack = applyEdits(pack, extra);
-  const base = player.solids.filter(s => !today.solids.includes(s));
-  today.build(pack, tiles);
-  player.solids = base.concat(today.solids);
-  vegetation.buildRecords(pack.trees.map(t => {
-    const w = frame.toWorld(t.lng, t.lat);
-    return { x: w.x, z: w.z, height: t.height, crown: t.crown };
-  }));
-  hud.setPack(packLine(pack));
+function rebuild(edits: Feature[], changes: StructureChange[]) {
+  structures.list = mergeChanges(structuresBase, changes);
+  structures.build(pid);
+  player.solids = solidsFrom(structures.list, frame, field, pid);
+  if (pack) {
+    pack = applyEdits(pack, edits);
+    today.build(pack, tiles);
+    player.solids = player.solids.concat(today.solids);
+    vegetation.buildRecords(pack.trees.map(t => {
+      const w = frame.toWorld(t.lng, t.lat);
+      return { x: w.x, z: w.z, height: t.height, crown: t.crown };
+    }));
+    hud.setPack(packLine(pack));
+  }
 }
 
 const stick = new Stick(app, {
@@ -214,6 +259,7 @@ async function boot() {
     return;
   }
   const area = field.areaAt(start.lng, start.lat) || index.areas[0];
+  pid = area.pid;
   // the property itself at full detail, then a wider box so the ground does not end at the fence,
   // then the valley and the ridges beyond it from the coarse global set — the horizon is real ground
   await field.loadBox(area.bbox, index.maxzoom);
@@ -238,6 +284,7 @@ async function boot() {
     packUrl ? loadPack(packUrl) : Promise.resolve(null)
   ]);
   pack = loaded;
+  structuresBase = structures.list.slice();
   structures.build(area.pid);
   player.solids = solidsFrom(structures.list, frame, field, area.pid);
 
@@ -259,9 +306,9 @@ async function boot() {
     }));
     if (pack.imagery) terrain.setImagery({ template: pack.imagery.template, maxzoom: pack.imagery.maxzoom });
     hud.setPack(packLine(pack));
-    // the edits made here last time and not yet saved come back on top of the record
-    editor.restore();
   }
+  // the changes made here last time and not yet saved come back on top of what is known
+  editor.restore();
 
   hud.setLoading('planting…');
   vegetation.build(p.x, p.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity, exclude: packRing() });
@@ -290,6 +337,7 @@ function loop() {
   last = now;
   if (ready) {
     player.update(dt);
+    editor.frame();
     const p = player.position;
     terrain.update(p.x, p.z, FINE);
     vegetation.update(p.x, p.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity, exclude: packRing() });
@@ -329,11 +377,15 @@ function packLine(p: PackData): string {
 
 // a small surface for tests and for the Playground shell to drive
 const api = {
-  player, frame, field, terrain, vegetation, structures, today, sky, scene, camera, renderer, stick, editor,
+  player, frame, field, terrain, vegetation, structures, today, sky, scene, camera, renderer, stick, editor, grid, inspect,
   get ready() { return ready; },
   get pack() { return pack; },
-  /** apply the editor's unsaved edits (or any list of edit features) on top of the record and redraw */
-  rebuild: (extra: Feature[] = editor.edits) => { rebuild(extra); return pack; },
+  get session() { return session; },
+  get structuresBase() { return structuresBase; },
+  /** become a role without the atlas (tests and the playground shell); a PIN is still needed to save */
+  setSession: (s: Session) => { session = s; saveSession(s); hud.setRole(s.role, caps().edit); if (!caps().edit) editor.setActive(false); editor.refresh(); },
+  /** apply the editor's unsaved work (or any lists) on top of what is known and redraw */
+  rebuild: (edits: Feature[] = editor.edits, changes: StructureChange[] = editor.structures) => { rebuild(edits, changes); return pack; },
   state: () => ({ ...player.state(), tiles: field.loadedTiles, community: slug, atlas }),
   goto: (lng: number, lat: number, heading = 0) => player.placeAt(lng, lat, heading),
   setTime: (h: number) => { clockHours = h; applySun(); },

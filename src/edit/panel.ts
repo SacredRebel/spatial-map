@@ -4,22 +4,31 @@
 //   too, and it redraws itself from the editor's state whenever the editor says something changed.
 
 import type { Editor, Pick, Tool } from './editor';
+import type { Caps, Role } from '../world/roles';
 
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
+const FT = 0.3048;
 
-const TOOLS: { id: Tool; key: string; label: string; hint: string }[] = [
-  { id: 'select', key: '1', label: '↖ select', hint: 'click a tree, a post, a marker, a line' },
+const TOOLS: { id: Tool; key: string; label: string; hint: string; needs?: keyof Caps }[] = [
+  { id: 'select', key: '1', label: '↖ select', hint: 'click a tree, a post, a marker, a line, a block · drag a block to move it' },
   { id: 'marker', key: '2', label: '📍 marker', hint: 'click the ground to pin a name there' },
   { id: 'tree', key: '3', label: '🌳 tree', hint: 'click the ground to plant a tree that is there' },
   { id: 'fence', key: '4', label: '⌇ fence', hint: 'click along the line · Enter to finish' },
   { id: 'path', key: '5', label: '⋯ path', hint: 'click along the path · Enter to finish' },
-  { id: 'road', key: '6', label: '═ road', hint: 'click along the road · Enter to finish' }
+  { id: 'road', key: '6', label: '═ road', hint: 'click along the road · Enter to finish' },
+  { id: 'block', key: '7', label: '▢ block', hint: 'set the size, then click the ground to put it down facing the way you face', needs: 'place' }
 ];
+
+export interface PanelOpts {
+  askPin: () => string | null;
+  role: () => Role;
+  caps: () => Caps;
+}
 
 export class Panel {
   root: HTMLElement;
 
-  constructor(container: HTMLElement, private editor: Editor, private askPin: () => string | null) {
+  constructor(container: HTMLElement, private editor: Editor, private o: PanelOpts) {
     this.root = document.createElement('aside');
     this.root.className = 'edit-panel';
     this.root.hidden = true;
@@ -31,25 +40,50 @@ export class Panel {
     const e = this.editor;
     this.root.hidden = !e.active;
     if (!e.active) return;
+    const caps = this.o.caps();
     const busy = e.moving ? `<div class="ep-note">put <b>${esc(e.moving.name)}</b> down: click the ground · Esc cancels</div>`
       : e.drawing.length ? `<div class="ep-note">${e.drawing.length} point${e.drawing.length === 1 ? '' : 's'} · <b>Enter</b> finish · <b>Backspace</b> undo point · <b>Esc</b> cancel</div>`
       : '';
     const save = e.lastSave ? `<div class="ep-save ${e.lastSave.ok ? 'ok' : 'bad'}">${esc(e.lastSave.message)}</div>` : '';
+    const proposed = e.proposed.edits.length + e.proposed.structures.length;
+    const tools = TOOLS.filter(t => !t.needs || caps[t.needs]);
     this.root.innerHTML = `
-      <div class="ep-head"><b>edit</b><span>${e.edits.length} unsaved</span><button class="ep-x" data-act="close" title="leave edit mode (B)">×</button></div>
-      <div class="ep-tools">${TOOLS.map(t => `<button class="ep-tool${t.id === e.tool ? ' on' : ''}" data-tool="${t.id}" title="${esc(t.hint)} (${t.key})">${t.label}</button>`).join('')}</div>
+      <div class="ep-head"><b>edit</b><span>${e.unsaved} unsaved${proposed ? ` · ${proposed} proposed` : ''}</span><em class="ep-role">${esc(this.o.role())}</em><button class="ep-x" data-act="close" title="leave edit mode (B)">×</button></div>
+      <div class="ep-tools">${tools.map(t => `<button class="ep-tool${t.id === e.tool ? ' on' : ''}" data-tool="${t.id}" title="${esc(t.hint)} (${t.key})">${t.label}</button>`).join('')}</div>
       <div class="ep-hint">${esc(TOOLS.find(t => t.id === e.tool)?.hint ?? '')}</div>
+      ${e.tool === 'block' ? this.blockForm() : ''}
       ${busy}
       ${this.selection(e.selection)}
       <div class="ep-list">${this.list()}</div>
       <div class="ep-actions">
-        <button class="btn" data-act="undo" ${e.edits.length ? '' : 'disabled'}>↶ undo</button>
+        <button class="btn" data-act="undo" ${e.unsaved ? '' : 'disabled'}>↶ undo</button>
+        <button class="btn" data-act="grid">▦ grid (V)</button>
         <button class="btn" data-act="download" ${e.edits.length ? '' : 'disabled'}>⤓ edits.geojson</button>
-        <button class="btn gold" data-act="save" ${e.edits.length ? '' : 'disabled'}>save to pack…</button>
+        <button class="btn gold" data-act="save" ${e.unsaved ? '' : 'disabled'}>${caps.commit ? 'save to pack…' : 'propose…'}</button>
       </div>
       ${save}`;
     this.root.querySelectorAll<HTMLElement>('[data-tool]').forEach(b => b.addEventListener('click', () => e.setTool(b.dataset.tool as Tool)));
     this.root.querySelectorAll<HTMLElement>('[data-act]').forEach(b => b.addEventListener('click', () => this.act(b.dataset.act!)));
+    this.root.querySelectorAll<HTMLInputElement>('[data-block]').forEach(i => i.addEventListener('change', () => {
+      const k = i.dataset.block as 'name' | 'w' | 'd' | 'h';
+      if (k === 'name') e.block.name = i.value.trim() || 'block';
+      else { const v = Number(i.value); if (isFinite(v) && v > 0) e.block[k] = v; }
+    }));
+    const height = this.root.querySelector<HTMLInputElement>('[data-height]');
+    height?.addEventListener('change', () => { const s = e.selection; if (s?.kind === 'structure') e.setHeight(s.id, Number(height.value)); });
+    const name = this.root.querySelector<HTMLInputElement>('[data-name]');
+    name?.addEventListener('change', () => { const s = e.selection; if (s?.kind === 'structure') e.rename(s.id, name.value); });
+  }
+
+  private blockForm(): string {
+    const b = this.editor.block;
+    return `<div class="ep-form">
+      <label>name <input data-block="name" value="${esc(b.name)}"></label>
+      <label>width <input data-block="w" type="number" step="0.5" min="0.5" value="${b.w}"> m</label>
+      <label>depth <input data-block="d" type="number" step="0.5" min="0.5" value="${b.d}"> m</label>
+      <label>height <input data-block="h" type="number" step="0.5" min="0.5" value="${b.h}"> m</label>
+      <small>${(b.w / FT).toFixed(0)} × ${(b.d / FT).toFixed(0)} ft · ${(b.w * b.d).toFixed(0)} m² · ${(b.w * b.d / (FT * FT)).toFixed(0)} sq ft</small>
+    </div>`;
   }
 
   private selection(p: Pick | null): string {
@@ -69,20 +103,34 @@ export class Panel {
           <div class="ep-row"><button class="btn" data-act="remove">✕ remove</button></div></div>`;
       case 'building':
         return `<div class="ep-sel"><b>${esc(p.name)}</b> <small>standing — from the county record; it cannot be edited here</small></div>`;
+      case 'structure': {
+        const s = p.structure;
+        const d = this.editor.dimensions(s);
+        const can = this.o.caps().place;
+        const what = s.status === 'massing' ? 'block' : s.status === 'model' ? 'model' : 'reserved site';
+        const size = s.status === 'model' ? '' : `${d.w.toFixed(1)} × ${d.d.toFixed(1)} m · ${Math.round(d.w / FT)} × ${Math.round(d.d / FT)} ft`;
+        return `<div class="ep-sel"><label class="ep-inline">name <input data-name value="${esc(s.name)}" ${can ? '' : 'disabled'}></label> <small>${what} · ${esc(s.mode)}</small>
+          ${size ? `<div class="ep-dim">${size}</div>` : ''}
+          ${s.status === 'massing' ? `<label class="ep-inline">height <input data-height type="number" step="0.5" min="0.5" max="90" value="${d.h.toFixed(1)}" ${can ? '' : 'disabled'}> m</label>` : ''}
+          ${can ? `<div class="ep-row"><button class="btn" data-act="rot-" title="turn 15° left ([)">↺ 15°</button><button class="btn" data-act="rot+" title="turn 15° right (])">↻ 15°</button>${s.status === 'model' ? `<button class="btn" data-act="up" title="raise 0.25 m (+)">▲</button><button class="btn" data-act="down" title="lower 0.25 m (−)">▼</button>` : ''}<button class="btn" data-act="remove">✕ remove</button></div>
+          <div class="muted">drag it across the ground to move it · it snaps to the half metre</div>` : ''}</div>`;
+      }
       case 'ground':
         return `<div class="ep-sel muted">ground · ${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}</div>`;
     }
   }
 
   private lineName(id: string): string {
-    const f = this.editor.edits.find(x => String(x.properties.id) === id);
+    const f = this.editor.edits.find(x => String(x.properties.id) === id) ?? this.editor.proposed.edits.find(x => String(x.properties.id) === id);
     return String(f?.properties.name || f?.properties.kind || id);
   }
 
   private list(): string {
     const e = this.editor;
-    if (!e.edits.length) return `<div class="muted">no unsaved edits — they are kept in this browser until you save them to the pack</div>`;
-    return e.edits.slice(-8).reverse().map(f => {
+    if (!e.unsaved) return `<div class="muted">no unsaved changes — they are kept in this browser until you ${this.o.caps().commit ? 'save them to the pack' : 'propose them'}</div>`;
+    const items: string[] = [];
+    for (const s of e.structures.slice(-6).reverse()) items.push(`<div class="ep-item">${s.remove ? `${esc(s.id)} taken off the registry` : `${esc(s.name)} · ${s.status === 'massing' ? 'block' : s.status}${s.note === 'placed in the world' ? ' placed' : ' changed'}`}</div>`);
+    for (const f of e.edits.slice(-8).reverse()) {
       const p = f.properties;
       const what = p.op === 'remove' && p.layer === 'trees' ? `tree marked gone`
         : p.op === 'remove' ? `${esc(p.target ?? p.id)} taken off the map`
@@ -91,8 +139,10 @@ export class Panel {
         : p.op === 'add' && p.layer === 'notes' ? `marker “${esc(p.name)}”`
         : p.op === 'add' && p.layer === 'lines' ? `${esc(p.kind)} “${esc(p.name)}”`
         : `${esc(p.op)} ${esc(p.layer)}`;
-      return `<div class="ep-item">${what}</div>`;
-    }).join('') + (e.edits.length > 8 ? `<div class="muted">… and ${e.edits.length - 8} more</div>` : '');
+      items.push(`<div class="ep-item">${what}</div>`);
+    }
+    const more = e.unsaved - items.length;
+    return items.join('') + (more > 0 ? `<div class="muted">… and ${more} more</div>` : '');
   }
 
   private act(a: string) {
@@ -101,12 +151,17 @@ export class Panel {
     switch (a) {
       case 'close': e.setActive(false); break;
       case 'undo': e.undo(); break;
+      case 'grid': e.toggleGrid(); break;
       case 'download': e.download(); break;
       case 'gone': if (s?.kind === 'tree') e.markGone(s.tree); break;
       case 'move': if (s?.kind === 'vision') e.beginMove(s.id, s.name); break;
       case 'remove': if (s) e.remove(s); break;
+      case 'rot-': if (s?.kind === 'structure') e.rotateStructure(s.id, -15); break;
+      case 'rot+': if (s?.kind === 'structure') e.rotateStructure(s.id, 15); break;
+      case 'up': if (s?.kind === 'structure') e.raiseStructure(s.id, 0.25); break;
+      case 'down': if (s?.kind === 'structure') e.raiseStructure(s.id, -0.25); break;
       case 'save': {
-        const pin = this.askPin();
+        const pin = this.o.askPin();
         if (pin) void e.save(pin);
         break;
       }
