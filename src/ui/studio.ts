@@ -11,8 +11,23 @@
 
 import type { EcoSite, EcoWalk } from '../world/site';
 
+/**
+ * Where the builder is deployed.
+ *
+ *   The intention was always same-origin — a static export of the editor with basePath `/builder`,
+ *   copied in beside the world, so the iframe never crosses an origin. That export does not exist
+ *   yet, and until it does `/builder/embed/` on this host is simply nothing: the overlay opened
+ *   onto a blank frame and waited for an `eco:ready` that could never arrive. It looked for all
+ *   the world like the builder was broken, and the builder was fine.
+ *
+ *   So the default is the editor's own deploy. Crossing the origin costs nothing here: the bridge
+ *   already posts to '*' and trusts a message only by its source window, never by its origin.
+ *   `?builder=/builder/embed/` still selects the same-origin path for whoever builds that export.
+ */
+export const BUILDER_URL = 'https://architect-editor-snowy.vercel.app/embed';
+
 export interface StudioOpts {
-  /** where the builder lives: same-origin `/builder/embed/` once deployed, or ?builder=<url> */
+  /** where the builder lives: BUILDER_URL by default, or ?builder=<url> to point somewhere else */
   url: string;
   community: string;
   /** the site to send once the builder says ready */

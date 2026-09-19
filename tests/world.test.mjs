@@ -594,6 +594,14 @@ check('roles: a member cannot pick up the pencil — B does nothing and the edit
 check('roles: the atlas turns a PIN into a role, and a role into the buttons', roles.wrong === 401 && roles.builder === 'builder' && /admin/.test(roles.roleButton) && roles.editButton === false, { wrong: roles.wrong, builder: roles.builder, button: roles.roleButton });
 
 // ---- the studio -------------------------------------------------------------------------------------
+// The default the overlay opens when nobody passes ?builder=. It pointed at same-origin
+// /builder/embed/ for three versions, which is nothing on this host: the frame stayed blank and the
+// builder took the blame. A default that is not absolute is the bug, so the check is for that.
+const builderDefault = await page.evaluate(() => window.world.builderUrl);
+check('studio: the overlay opens somewhere that exists, not a same-origin path with nothing behind it',
+  typeof builderDefault === 'string' && /^https:\/\//.test(builderDefault) && !builderDefault.startsWith('/'),
+  { url: builderDefault });
+
 // The builder in an overlay: the world knocks, the studio answers, the SITE goes down the wire
 // (real heights, real guides), and a finished design comes back and stands on the hill at once.
 const studioOpen = await page.evaluate((base) => {
@@ -603,9 +611,9 @@ const studioOpen = await page.evaluate((base) => {
   w.studio.open();
   return w.studio.state().open;
 }, BASE);
-await page.waitForFunction(() => window.world.studio.state().ready, { timeout: 15000 });
+await page.waitForFunction(() => window.world.studio.state().ready, null, { timeout: 15000 });
 // the fixture's confirmation is one more message hop behind ready — wait for it, not a guess
-await page.waitForFunction(() => /site w=/.test(window.world.studio.state().notice || ''), { timeout: 8000 });
+await page.waitForFunction(() => /site w=/.test(window.world.studio.state().notice || ''), null, { timeout: 8000 });
 const studioSite = await page.evaluate(() => window.world.studio.state());
 check('studio: the overlay opens, the builder answers, and the real site crosses the bridge',
   studioOpen === true && studioSite.ready === true && studioSite.siteSent && studioSite.siteSent.w === 97 && studioSite.siteSent.h === 97 && studioSite.siteSent.guides >= 2,

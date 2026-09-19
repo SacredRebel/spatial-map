@@ -44,7 +44,7 @@ import { Player } from './player/player';
 import { loadAvatar } from './player/avatar';
 import { Hud } from './ui/hud';
 import { Stick, touchCapable } from './ui/stick';
-import { Studio } from './ui/studio';
+import { Studio, BUILDER_URL } from './ui/studio';
 import { buildSite, refGlbOf, type EcoSite } from './world/site';
 import { Looks, type Quality } from './world/looks';
 import './style.css';
@@ -517,7 +517,7 @@ const designRow = (): Structure | null =>
   structures.list.find(s => s.pid === pid && s.status === 'model' && s.model) ??
   structures.list.find(s => s.pid === pid) ?? null;
 const studio = new Studio({
-  url: qs.get('builder') || '/builder/embed/',
+  url: qs.get('builder') || BUILDER_URL,
   community: community.name,
   site: (): EcoSite | null => {
     const ll = frame.toLngLat(player.position.x, player.position.z);
@@ -569,7 +569,9 @@ const api = {
     player.setRig(rig);
     hud.setAvatar(rig.kind, rig.boneCount);
     return rig.kind;
-  }
+  },
+  /** where the overlay will look for the builder — the suite guards that it is somewhere real */
+  builderUrl: qs.get('builder') || BUILDER_URL
 };
 (window as unknown as { world: unknown }).world = api;
 
