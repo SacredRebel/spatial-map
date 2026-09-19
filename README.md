@@ -34,8 +34,7 @@ behind Vercel's own sign-in; they are for checking a build, not for sharing.
 ```bash
 npm install
 npm run dev        # http://localhost:5180
-npm run models     # the massing models into public/models (python3 with numpy and scipy)
-npm run build      # the models, then typecheck, then build to dist/
+npm run build      # typecheck, then build to dist/
 npm test           # the world, driven in a real browser against a known hillside
 ```
 
@@ -219,21 +218,17 @@ it replaces (`clears: ['house']`, by the kind the record draws it as), so a prop
 through the building it is meant to succeed; and the record's trees inside a model's outline are
 not drawn either, since nothing grows through a floor.
 
-**`scripts/massing/`** — a massing model made by script, not by hand. `glb.py` is a small glTF
-writer (one mesh per material, the walk rings on the scene) and `oak-leaf.py` is the first house
-made with it: the Oak Leaf for Sulphur Mountain, three leaves round the river-stone chimney that
-stands there today, every level and every length in metres, sited from the owner's own marks on
-the aerial. `preview.mjs` renders a `.glb` on its own from a few points of view, so a model can be
-looked at before it goes anywhere near the ground. No `.glb` is committed: `build-models.mjs` runs
-the generators at build time into `public/models`, so the model is served beside the world
-(`/models/oak-leaf-massing.glb`) and its row in the atlas's `data/structures.json` points there. A
-change to the design is a change to the script, never a hand edit of a mesh.
+**Models are not built here.** A property's structures belong to that property's pack, together with
+the scripts that generate them — one engine, one pack per property, and the engine carries no
+property's content. The Oak Leaf and its generators live in
+[sulphur-mountain-world](https://github.com/SacredRebel/sulphur-mountain-world): `scripts/glb.py`
+writes the glTF, `scripts/oak-leaf.py` is the house, `scripts/plan.py` draws a measured plan from the
+same walk floors and solids the world stands on, and `scripts/preview.mjs` renders a `.glb` on its own
+before it goes anywhere near the ground. `node scripts/build-models.mjs` in that repository rebuilds
+`models/`, which is committed and served with the rest of the pack. A change to a design is a change
+to its script, never a hand edit of a mesh.
 
-**`scripts/massing/plan.py`** — a measured plan of a massing, drawn from the model rather than about
-it. Every line comes from the same walk floors and solids the world stands on, so a reader who scales
-a dimension off the drawing gets the truth; water reads as water, anything below the drawn floor is
-dashed, the roofs above are dashed, and it carries a scale bar, a north arrow and the level table.
-Output is one SVG with no dependencies. `node tests/svg2png.mjs plan.svg plan.png` rasterises it.
+This repository needs no python to deploy and produces no `.glb`. It reads them.
 
 **`world/looks.ts`** — how the light lands: ground-truth ambient occlusion over the frame, and the sky
 dome pre-filtered into an environment map so a wall is lit by the sky it stands under rather than by
