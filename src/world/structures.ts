@@ -176,7 +176,8 @@ export class Structures {
   private async addModel(s: Structure) {
     try {
       const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
-      const url = s.model!.startsWith('http') ? s.model! : `${this.origin}${s.model}`;
+      // absolute (another of ours serves it), a blob the studio just handed over, or the atlas's own path
+      const url = s.model!.startsWith('http') || s.model!.startsWith('blob:') ? s.model! : `${this.origin}${s.model}`;
       const gltf = await new GLTFLoader().loadAsync(url);
       const root = gltf.scene;
       const [lng, lat] = s.position!;

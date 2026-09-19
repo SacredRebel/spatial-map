@@ -44,6 +44,8 @@ import { Player } from './player/player';
 import { loadAvatar } from './player/avatar';
 import { Hud } from './ui/hud';
 import { Stick, touchCapable } from './ui/stick';
+import { Studio } from './ui/studio';
+import { buildSite, refGlbOf, type EcoSite } from './world/site';
 import './style.css';
 
 const DEFAULT_ATLAS = 'https://eco-village-map.vercel.app';
@@ -91,7 +93,10 @@ const remember = {
   get: (k: string) => { try { return localStorage.getItem('world.' + k); } catch { return null; } },
   set: (k: string, v: string | null) => { try { v == null ? localStorage.removeItem('world.' + k) : localStorage.setItem('world.' + k, v); } catch { /* private windows forget */ } }
 };
-const avatarUrl = qs.get('avatar') ?? remember.get('avatar');
+// the community's own character walks by default — a chosen or remembered body still wins,
+// and if the file is missing the built-in body steps in without a word
+const DEFAULT_AVATAR = '/avatar/eco-steward.glb';
+const avatarUrl = qs.get('avatar') ?? remember.get('avatar') ?? DEFAULT_AVATAR;
 const lookScale0 = Math.min(2, Math.max(0.4, Number(remember.get('look')) || 1));
 const camDist0 = Math.min(14, Math.max(1.6, Number(remember.get('camdist')) || 6.4));
 const plantDensity = num('plants', 1, 0, 2);
@@ -170,6 +175,7 @@ const hud = new Hud(app, {
   onRecentre: () => player.placeAt(start.lng, start.lat, start.heading),
   onFly: () => { if (caps().fly) player.toggleMode(); },
   onEdit: () => editor.toggle(),
+  onStudio: () => void openStudio(),
   onRole: () => void signIn(),
   // the character panel: the choices stick, in this browser, for next time
   onAvatar: async (url) => { const kind = await api.setAvatar(url); remember.set('avatar', url && kind !== 'capsule' ? url : null); return kind; },
@@ -239,7 +245,7 @@ function rebuild(edits: Feature[], changes: StructureChange[]) {
       grid.visible = grid.visible;                // forgets its centre, so it is rebuilt on the next frame
     }
   }
-  structures.list = mergeChanges(structuresBase, changes);
+  structures.list = mergeChanges(structuresBase, studioPreview ? changes.concat([studioPreview]) : changes);
   structures.build(pid);
   if (pack) {
     today.build(pack, tiles, structures.cleared(pid));
@@ -446,8 +452,45 @@ function packLine(p: PackData): string {
 }
 
 // a small surface for tests and for the Playground shell to drive
+// ---- the studio: the builder in an overlay, the site out, the design back --------------------------
+// The designed structure for this property anchors the site; the finished design comes back as a
+// GLB and stands in the world at once, as a preview row the registry never sees until it is saved.
+let studioPreview: StructureChange | null = null;
+let studioRef: string | null = null;
+const designRow = (): Structure | null =>
+  structures.list.find(s => s.pid === pid && s.status === 'model' && s.model) ??
+  structures.list.find(s => s.pid === pid) ?? null;
+const studio = new Studio({
+  url: qs.get('builder') || '/builder/embed/',
+  community: community.name,
+  site: (): EcoSite | null => {
+    const ll = frame.toLngLat(player.position.x, player.position.z);
+    const s = buildSite(frame, field, pack, designRow(), ll);
+    if (studioRef) s.refGlb = studioRef;
+    return s;
+  },
+  onGlb: (glb, _walk, originLL) => {
+    if (studioPreview?.model?.startsWith('blob:')) URL.revokeObjectURL(studioPreview.model);
+    const url = URL.createObjectURL(new Blob([glb.buffer as ArrayBuffer], { type: 'model/gltf-binary' }));
+    const base = designRow();
+    studioPreview = {
+      id: 'studio-preview', pid, mode: 'vision', status: 'model',
+      name: 'The studio design (preview)',
+      note: 'Made in the studio just now; not yet saved to the atlas.',
+      model: url, position: originLL, altitudeM: base?.altitudeM ?? 0.3,
+      rotationDeg: 0, scale: 1, enter: true, clears: base?.clears ?? ['house']
+    };
+    rebuild(editor.edits, editor.structures);
+  }
+});
+async function openStudio() {
+  if (!caps().edit) return;
+  studioRef = await refGlbOf(designRow());
+  studio.open();
+}
+
 const api = {
-  THREE, player, frame, field, terrain, vegetation, structures, today, build, sky, scene, camera, renderer, stick, editor, grid, inspect, magic,
+  THREE, player, frame, field, terrain, vegetation, structures, today, build, sky, scene, camera, renderer, stick, editor, grid, inspect, magic, studio,
   get ready() { return ready; },
   get pack() { return pack; },
   get session() { return session; },

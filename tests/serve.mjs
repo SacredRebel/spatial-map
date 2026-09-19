@@ -60,6 +60,7 @@ export function start(port = PORT) {
     const url = new URL(req.url, `http://localhost:${port}`);
     let p = decodeURIComponent(url.pathname);
     try {
+      if (p === '/fixture-builder.html') return send(res, 200, await readFile(join(here, 'fixture-builder.html')), TYPES['.html']);
       if (p === '/terrain/index.json') return send(res, 200, JSON.stringify(index()), TYPES['.json']);
       const tile = /^\/terrain\/(\d+)\/(\d+)\/(\d+)\.png$/.exec(p);
       if (tile) {

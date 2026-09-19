@@ -1,0 +1,26 @@
+<!doctype html>
+<!-- A stand-in studio: the smallest page that speaks eco/1, so the world's side of the bridge
+     is proven without a second real editor. It answers hello with ready, and confirms the site
+     it received by sending its dimensions back up the only channel the host records verbatim. -->
+<meta charset="utf-8">
+<title>fixture builder</title>
+<body style="background:#131715;color:#9a9;font:12px monospace;padding:12px">the fixture builder is listening…
+<script>
+  let host = null, origin = '*';
+  window.addEventListener('message', (e) => {
+    const m = e.data;
+    if (!m || typeof m !== 'object') return;
+    if (m.t === 'eco:hello' && m.v === 'eco/1') {
+      host = e.source; origin = e.origin || '*';
+      host.postMessage({ t: 'eco:ready', v: 'eco/1', caps: ['site', 'scene', 'glb'] }, origin);
+      return;
+    }
+    if (m.t === 'eco:load-site' && host) {
+      const s = m.site || {};
+      const t = s.terrain || {};
+      const g = Array.isArray(s.guides) ? s.guides.length : 0;
+      document.body.textContent = 'site received: ' + t.w + 'x' + t.h + ', ' + g + ' guides';
+      host.postMessage({ t: 'eco:error', message: 'fixture: site w=' + t.w + ' h=' + t.h + ' guides=' + g + ' elev=' + Math.round(s.originElevM) }, origin);
+    }
+  });
+</script>

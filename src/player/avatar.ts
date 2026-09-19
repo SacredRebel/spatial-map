@@ -295,7 +295,20 @@ export async function loadAvatar(url?: string | null): Promise<AvatarRig> {
       };
       return new BoneRig(vrm.scene, bones, 'vrm', vrm);
     }
-    return new BoneRig(gltf.scene, findBones(gltf.scene), 'gltf');
+    // a plain glTF arrives at whatever size and origin its maker chose. Stand it on its feet at
+    // human height in a wrapper, so the rig's own bones and the maker's proportions stay untouched.
+    const wrap = new THREE.Group();
+    wrap.name = 'avatar:normalised';
+    wrap.add(gltf.scene);
+    gltf.scene.rotation.y = Math.PI;       // glTF convention faces +z; this world walks toward -z
+    const box = new THREE.Box3().setFromObject(gltf.scene);
+    const h = box.max.y - box.min.y;
+    if (isFinite(h) && h > 0.01) {
+      const k = 1.8 / h;
+      wrap.scale.setScalar(k);
+      wrap.position.y = -box.min.y * k;
+    }
+    return new BoneRig(wrap, findBones(gltf.scene), 'gltf');
   } catch (e) {
     console.info('[world] avatar fell back to the built-in body:', e);
     return new CapsuleRig();

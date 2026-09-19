@@ -7,7 +7,7 @@
 import { chromium } from 'playwright';
 import { existsSync } from 'fs';
 import { start } from './serve.mjs';
-import { height, ORIGIN, PACK_TREES, PACK_STANDING, removedByEdits, PACK_HOUSE, PACK_GARAGE, PACK_AOI, at, FIXTURE_MODEL } from './fixture.mjs';
+import { height, ORIGIN, PACK_TREES, PACK_STANDING, removedByEdits, PACK_HOUSE, PACK_GARAGE, PACK_AOI, at, FIXTURE_MODEL, fixtureModelGlb } from './fixture.mjs';
 
 const PORT = 5181;
 const BASE = `http://localhost:${PORT}`;
@@ -585,6 +585,41 @@ const roles = await page.evaluate(async () => {
 check('roles: a member cannot pick up the pencil — B does nothing and the edit button is not offered',
   roles.member === 'member' && !roles.refused.active && !roles.refused.editing && /PIN/.test(roles.refused.said || '') && roles.refused.editButton === true, roles.refused);
 check('roles: the atlas turns a PIN into a role, and a role into the buttons', roles.wrong === 401 && roles.builder === 'builder' && /admin/.test(roles.roleButton) && roles.editButton === false, { wrong: roles.wrong, builder: roles.builder, button: roles.roleButton });
+
+// ---- the studio -------------------------------------------------------------------------------------
+// The builder in an overlay: the world knocks, the studio answers, the SITE goes down the wire
+// (real heights, real guides), and a finished design comes back and stands on the hill at once.
+const studioOpen = await page.evaluate((base) => {
+  const w = window.world;
+  // point the overlay at the fixture builder served beside the world
+  w.studio['opts'].url = base + '/fixture-builder.html';
+  w.studio.open();
+  return w.studio.state().open;
+}, BASE);
+await page.waitForFunction(() => window.world.studio.state().ready, { timeout: 15000 });
+// the fixture's confirmation is one more message hop behind ready — wait for it, not a guess
+await page.waitForFunction(() => /site w=/.test(window.world.studio.state().notice || ''), { timeout: 8000 });
+const studioSite = await page.evaluate(() => window.world.studio.state());
+check('studio: the overlay opens, the builder answers, and the real site crosses the bridge',
+  studioOpen === true && studioSite.ready === true && studioSite.siteSent && studioSite.siteSent.w === 97 && studioSite.siteSent.h === 97 && studioSite.siteSent.guides >= 2,
+  { sent: studioSite.siteSent });
+check('studio: the builder confirms what it was handed — the grid, the guides and the ground elevation',
+  /site w=97 h=97 guides=\d+/.test(studioSite.notice || ''), { echoed: studioSite.notice });
+
+const glbB64 = fixtureModelGlb().toString('base64');
+const stPlaced = await page.evaluate(async ({ b64 }) => {
+  const w = window.world;
+  const before = w.player.platforms.length;
+  w.studio.handle({ t: 'eco:glb', glb: b64, walk: null, originLL: [-119.15630, 34.43310] });
+  const t0 = performance.now();
+  while (w.player.platforms.length <= before && performance.now() - t0 < 12000) await new Promise(r => setTimeout(r, 120));
+  const row = w.structures.list.find(s => s.id === 'studio-preview');
+  w.studio.close();
+  return { before, after: w.player.platforms.length, row: row && { name: row.name, enter: row.enter, blob: /^blob:/.test(row.model || '') }, open: w.studio.state().open };
+}, { b64: glbB64 });
+check('studio: a design sent back stands in the world at once — a preview row, enterable, walkable',
+  stPlaced.row && stPlaced.row.enter === true && stPlaced.row.blob === true && stPlaced.after > stPlaced.before && stPlaced.open === false,
+  stPlaced);
 
 const treeAt = (e, n) => PACK_STANDING.findIndex(t => t.e === e && t.n === n);
 const pickTree = await page.evaluate(({ tree, from }) => {

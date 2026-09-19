@@ -21,6 +21,8 @@ export interface HudOpts {
   onFly: () => void;
   /** edit mode on / off (B) */
   onEdit: () => void;
+  /** open the design studio overlay */
+  onStudio: () => void;
   /** the role button: sign in with a PIN, or sign out */
   onRole: () => void;
   /** the character panel: pick a body by URL (null = the built-in capsule); resolves to what loaded */
@@ -51,12 +53,13 @@ export class Hud {
     this.root.className = 'hud';
     this.root.innerHTML = `
       <header class="hud-top">
-        <div class="brand"><span class="mark">◈</span><b>${esc(o.community)}</b><span class="sub">walkable world · v0.11.1</span></div>
+        <div class="brand"><span class="mark">◈</span><b>${esc(o.community)}</b><span class="sub">walkable world · v0.12.0</span></div>
         <div class="acts">
           <button class="btn" data-act="char" data-el="char" title="the character: body, camera, controls">🧍 character</button>
           <button class="btn" data-act="view" title="first / third person (C)">👤 view</button>
           <button class="btn" data-act="fly" data-el="fly" title="fly / walk (G)">🕊 fly</button>
           <button class="btn" data-act="edit" data-el="edit" title="edit the world (B)">✎ edit</button>
+          <button class="btn" data-act="studio" data-el="studio" title="design the house in the studio" hidden>🏗 studio</button>
           <button class="btn" data-act="role" data-el="role" title="who you are here">◌ member</button>
           <button class="btn" data-act="recentre" title="back to the start">⌖ recentre</button>
         </div>
@@ -122,6 +125,7 @@ export class Hud {
     this.q('[data-act="recentre"]').addEventListener('click', () => o.onRecentre());
     this.q('[data-act="fly"]').addEventListener('click', () => o.onFly());
     this.q('[data-act="edit"]').addEventListener('click', () => o.onEdit());
+    this.q('[data-act="studio"]').addEventListener('click', () => o.onStudio());
     this.q('[data-act="role"]').addEventListener('click', () => o.onRole());
 
     // the character panel — the body, the camera and every control, where the character lives
@@ -196,6 +200,7 @@ export class Hud {
     b.classList.toggle('on', role !== 'member');
     b.title = role === 'member' ? 'enter a PIN to build or administer' : `${role} · click to sign out`;
     this.q('[data-el="edit"]').hidden = !canEdit;
+    this.q('[data-el="studio"]').hidden = !canEdit;
   }
 
   /** light up the fly and edit buttons when they are on, and say what the keys do now */
