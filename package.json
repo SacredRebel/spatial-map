@@ -3,14 +3,13 @@
   "version": "0.13.2",
   "private": true,
   "type": "module",
-  "description": "The walkable world — a browser-native open world over real 1 m terrain, one world per community.",
+  "description": "The walkable world \u2014 a browser-native open world over real 1 m terrain, one world per community.",
   "scripts": {
     "dev": "vite",
-    "build": "node scripts/massing/build-models.mjs && tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "check": "tsc --noEmit",
-    "test": "node tests/world.test.mjs",
-    "models": "node scripts/massing/build-models.mjs"
+    "test": "node tests/world.test.mjs"
   },
   "dependencies": {
     "@pixiv/three-vrm": "^3.5.5",
