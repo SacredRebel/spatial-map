@@ -46,6 +46,7 @@ import { Hud } from './ui/hud';
 import { Stick, touchCapable } from './ui/stick';
 import { Studio } from './ui/studio';
 import { buildSite, refGlbOf, type EcoSite } from './world/site';
+import { Looks, type Quality } from './world/looks';
 import './style.css';
 
 const DEFAULT_ATLAS = 'https://eco-village-map.vercel.app';
@@ -127,6 +128,14 @@ const field = new HeightField(atlas, farSource);
 const terrain = new Terrain(frame, field);
 const vegetation = new Vegetation(frame, field);
 const sky = new Sky();
+// The occlusion and the sky-lit ambient are OFF unless asked for: ?looks=auto|plain|full.
+//
+//   The sun in this world is the real NOAA position and it already reads correctly; the owner's
+//   call is that the picture is good enough as it stands and the effort belongs on the house. So
+//   the chain is built, tested and parked — nothing here costs a frame or a byte until someone
+//   types the parameter, and 'auto' then reads the device the way it always would have.
+const looksWant = (qs.get('looks') as Quality | 'auto' | null) ?? 'off';
+const looks = new Looks({ renderer, scene, camera, want: looksWant });
 const structures = new Structures(frame, field, atlas);
 const today = new Today(frame, field);
 const build = new Build(frame, field);
@@ -158,6 +167,20 @@ let tiles: TodayTiles = {};
 let structuresBase: Structure[] = [];
 let pid = community.pid;
 let session: Session = loadSession();
+/**
+ * ?role=builder — the pencil, without asking the atlas first.
+ *
+ *   The pencil was gated behind a PIN that only the atlas knows, and if nobody has set one there
+ *   is no PIN on earth that works: B does nothing, the editor never opens, and the world is a
+ *   thing you can only look at. That is a bad failure, and the gate was not buying much — the
+ *   console can already hand itself a role, and nothing drawn this way can reach the pack.
+ *
+ *   So the role is a URL parameter now. What it grants is LOCAL: draw, place, shape, undo, all
+ *   kept in this browser. Saving still goes through the atlas and the atlas still wants a PIN,
+ *   which is where the real gate always was.
+ */
+const roleParam = qs.get('role');
+if (roleParam === 'builder' || roleParam === 'admin') session = { role: roleParam, pin: null };
 const caps = () => CAPS[session.role];
 const grid = new GroundGrid(frame, field);
 
@@ -206,6 +229,8 @@ const panel = new Panel(app, editor, {
 });
 const inspect = new Inspect(app, renderer.domElement, editor, () => pack);
 hud.setRole(session.role, caps().edit);
+if (roleParam && session.pin === null && session.role !== 'member')
+  hud.setNotice(`${session.role} for this browser — draw, place and shape freely. Saving to the atlas still needs a PIN.`);
 
 /** the role button: a PIN makes a builder or an admin; a second click signs out */
 async function signIn() {
@@ -274,6 +299,12 @@ function applySun() {
   const { pos, horizon } = sky.set(instantAt(clockHours, community.tz), start.lat, start.lng);
   hud.setSun(pos.altitude, pos.azimuth);
   renderer.toneMappingExposure = EXPOSURE * sky.exposure;
+  // the dome has just been recoloured for this hour: pre-filter it so everything is lit by the sky
+  // it is actually standing under, and ease off the stand-in fill that was doing that job
+  const fillWas = sky.skylightScale;
+  if (looks.quality !== 'off' && looks.lightFromSky(sky.mesh)) sky.skylightScale = 0.4;
+  // sky.set() has already used the old scale a line ago; carry the change onto this hour's fill
+  if (sky.skylightScale !== fillWas) sky.ambient.intensity *= sky.skylightScale / fillWas;
   // the haze is the colour the sky itself is at the horizon, so far ground dissolves into it
   if (!scene.fog) scene.fog = new THREE.Fog(horizon, HAZE.near, HAZE.far);
   else scene.fog.color.copy(horizon);
@@ -426,13 +457,14 @@ function loop() {
     const m = `${player.mode}/${editor.active}`;
     if (m !== shownMode) { shownMode = m; hud.setMode(player.mode === 'fly', editor.active); }
   }
-  renderer.render(scene, camera);
+  looks.render(dt);
 }
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+  looks.resize();
 });
 
 /** one line for the HUD: what the pack brought, and how old each part is */
@@ -491,7 +523,7 @@ async function openStudio() {
 }
 
 const api = {
-  THREE, player, frame, field, terrain, vegetation, structures, today, build, sky, scene, camera, renderer, stick, editor, grid, inspect, magic, studio,
+  THREE, player, frame, field, terrain, vegetation, structures, today, build, sky, scene, camera, renderer, stick, editor, grid, inspect, magic, studio, looks,
   get ready() { return ready; },
   get pack() { return pack; },
   get session() { return session; },

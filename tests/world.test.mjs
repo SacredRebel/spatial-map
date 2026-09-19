@@ -37,8 +37,15 @@ page.on('pageerror', e => errs.push('PAGE ' + e.message));
 page.on('console', m => { if (m.type() === 'error') errs.push('CONSOLE ' + m.text().slice(0, 200)); });
 
 await page.goto(`${BASE}/?atlas=${BASE}&community=sulphur-mountain&pack=${BASE}/pack/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
-await page.waitForFunction(() => window.world && window.world.ready, { timeout: 45000 });
+await page.waitForFunction(() => window.world && window.world.ready, null, { timeout: 45000 });
 await page.waitForTimeout(400);
+
+// The world now opens on the street in front of the house, which is the right place for a visitor
+// and the wrong place for a fixture: every height in this file is worked out from the synthetic
+// plane at ORIGIN. So stand at ORIGIN first and plant around it — what is being checked here is
+// the ground and the rule, not where the front door happens to be.
+await page.evaluate(([lng, lat]) => { window.world.goto(lng, lat, 0); window.world.replant(); }, [ORIGIN.lng, ORIGIN.lat]);
+await page.waitForTimeout(300);
 
 // ---- the ground -------------------------------------------------------------------------------
 const boot = await page.evaluate(() => {
@@ -162,7 +169,10 @@ const veg = await page.evaluate(() => {
     for (let i = 0; i < m.count; i += step) {
       const e = m.instanceMatrix.array;
       const o = i * 16;
-      sample.push({ name: m.name, x: e[o + 12], y: e[o + 13], z: e[o + 14] });
+      // world XZ is metres from the frame's own origin, and the frame is anchored wherever the
+      // world opened — so ask the frame where this is rather than assuming it opened at ORIGIN
+      const ll = window.world.frame.toLngLat(e[o + 12], e[o + 14]);
+      sample.push({ name: m.name, x: e[o + 12], y: e[o + 13], z: e[o + 14], lng: ll.lng, lat: ll.lat });
     }
   }
   return { counts: v.counts, meshes, sample, total: v.group.children.reduce((a, m) => a + m.count, 0) };
@@ -242,10 +252,7 @@ check('vegetation: replanting from a different standing position puts every shar
 
 {
   // every sampled plant must sit exactly on the surface the walker stands on
-  const wrong = veg.sample.map(p => {
-    const ll = { lng: ORIGIN.lng + p.x / MX, lat: ORIGIN.lat - p.z / MY };
-    return Math.abs(p.y - truth(ll.lng, ll.lat));
-  });
+  const wrong = veg.sample.map(p => Math.abs(p.y - truth(p.lng, p.lat)));
   const worstPlant = Math.max(...wrong);
   check('vegetation: every plant stands on the ground, not above or below it', worstPlant < 0.05,
     { sampled: veg.sample.length, worstErrorM: +worstPlant.toFixed(4) });
@@ -696,7 +703,7 @@ check('edit: every edit is one feature of the pack\'s own vocabulary — its own
 
 // ---- the editor: what survives a reload, and what a save does --------------------------------------
 await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
-await page.waitForFunction(() => window.world && window.world.ready, { timeout: 45000 });
+await page.waitForFunction(() => window.world && window.world.ready, null, { timeout: 45000 });
 await page.waitForTimeout(300);
 const back = await page.evaluate(() => {
   const w = window.world;
@@ -1078,7 +1085,7 @@ await page.evaluate(() => { window.world.setSession({ role: 'admin', pin: '4242'
 // and without a pack, the world is what it was: the rule plants everywhere and nothing stands
 const bare = await ctx.newPage();
 await bare.goto(`${BASE}/?atlas=${BASE}&community=sulphur-mountain&pack=0`, { waitUntil: 'domcontentloaded', timeout: 30000 });
-await bare.waitForFunction(() => window.world && window.world.ready, { timeout: 45000 });
+await bare.waitForFunction(() => window.world && window.world.ready, null, { timeout: 45000 });
 const plain = await bare.evaluate((aoi) => {
   const w = window.world;
   let n = 0;
@@ -1158,14 +1165,14 @@ check('model: taken away again, the house stands and nothing of the model is lef
 // back to the coarse global set, says so in a notice, and stands the player on that ground.
 const down = await ctx.newPage();
 await down.goto(`${BASE}/?atlas=${BASE}/nowhere&community=sulphur-mountain&pack=${BASE}/pack/&far=${encodeURIComponent(`${BASE}/coarse/{z}/{x}/{y}.png`)}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
-await down.waitForFunction(() => window.world && window.world.ready, { timeout: 60000 });
+await down.waitForFunction(() => window.world && window.world.ready, null, { timeout: 60000 });
 const coarse = await down.evaluate(() => {
   const w = window.world;
   const s = w.state();
-  return { ready: w.ready, coarse: w.field.coarse, tiles: s.tiles, groundM: s.groundM, notice: document.querySelector('[data-el="notice"]')?.textContent, loading: document.querySelector('.loading').hidden, pack: !!w.pack, trees: w.pack ? w.pack.trees.length : 0, fine: !!w.terrain.group.getObjectByName('terrain-fine') };
+  return { ready: w.ready, coarse: w.field.coarse, tiles: s.tiles, groundM: s.groundM, lng: s.lng, lat: s.lat, notice: document.querySelector('[data-el="notice"]')?.textContent, loading: document.querySelector('.loading').hidden, pack: !!w.pack, trees: w.pack ? w.pack.trees.length : 0, fine: !!w.terrain.group.getObjectByName('terrain-fine') };
 });
 check('fallback: with no fine pyramid the world still opens on the coarse set, says so, and the player stands on real ground',
-  coarse.ready && coarse.coarse && coarse.tiles > 0 && Math.abs(coarse.groundM - truth(ORIGIN.lng, ORIGIN.lat)) < 1.5 && /coarse/.test(coarse.notice || '') && coarse.loading && coarse.pack && coarse.trees > 0 && coarse.fine, coarse);
+  coarse.ready && coarse.coarse && coarse.tiles > 0 && Math.abs(coarse.groundM - truth(coarse.lng, coarse.lat)) < 1.5 && /coarse/.test(coarse.notice || '') && coarse.loading && coarse.pack && coarse.trees > 0 && coarse.fine, coarse);
 await down.close();
 
 // ---- the sun ----------------------------------------------------------------------------------
@@ -1183,6 +1190,58 @@ const noon = sun.find(s => s.h === 12), night = sun.find(s => s.h === 23), dawn 
 // local time at the community, not the viewer's clock: noon means noon on that hillside
 check('sun: at local noon it is high and to the south, at dawn it is low and east, at 23:00 it is down',
   noon.y > 0.55 && noon.z > 0 && dawn.x > 0.4 && dawn.y < 0.45 && night.y <= 0.03, { noon, dawn, night });
+
+// ---- how the light lands -------------------------------------------------------------------------
+// The occlusion and the sky-lit ambient are an addition, never a condition. Three things must hold:
+// the chain builds, the sky becomes the light, and a machine that cannot afford it still sees the
+// world. The last one is the whole contract — a slow frame steps the chain down, it does not stall.
+const looks = await page.evaluate(async () => {
+  const w = window.world, L = w.looks;
+  L.watchdog = false;
+  const off = await L.set('off');
+  const offDrew = (() => { try { L.render(0.016); return true; } catch { return false; } })();
+  const full = await L.set('full');
+  w.setTime(11);                       // the sun moving is what pre-filters the dome; off means never
+  const st = L.state();
+  return {
+    off, full, offDrew, quality: st.quality, env: st.env, ao: st.ao,
+    camFar: w.camera.far, camFov: w.camera.fov
+  };
+});
+// 'off' is the renderer the world had before any of this existed, and it must still draw
+check('looks: the plain render is always there, and the full chain builds on top of it',
+  looks.off === 'off' && looks.offDrew && looks.full === 'full' && looks.quality === 'full', looks);
+
+// a hemisphere light cannot know that the west is orange at six; the pre-filtered dome can
+check('looks: the sky itself becomes the light, so a wall is lit by the sky it stands under',
+  looks.env === true, { env: looks.env });
+
+// the world's camera sees 60 km so the far ridge is in the picture; an occlusion buffer stretched
+// that far is reading noise, so the occlusion gets the same lens on a horizon it can resolve
+check('looks: the occlusion keeps the picture\'s lens and drops its horizon to where occlusion reads',
+  !!looks.ao && looks.ao.fov === looks.camFov && looks.ao.far < 1000 && looks.ao.far < looks.camFar / 50 && looks.ao.near >= 0.2,
+  { ao: looks.ao, camFar: looks.camFar });
+
+// the contract: too slow, and it steps down and stays down — a phone gets the world, at speed
+await page.evaluate(async () => {
+  const L = window.world.looks;
+  await L.set('full');
+  L.downgraded = false;
+  L.watchdog = true;
+  for (let i = 0; i < 8; i++) L.render(0.5);        // 2 fps, well past the patience
+});
+// Building a rung takes a fetch, so between the decision and the chain there is a gap. What is
+// being checked is that the DECISION was taken and that the world kept drawing through it — not
+// how fast this particular machine can rebuild a render chain.
+const guard = await page.evaluate(() => {
+  const L = window.world.looks;
+  const after = L.state();
+  const drew = (() => { try { L.render(0.5); return true; } catch { return false; } })();
+  L.watchdog = false;
+  return { quality: after.quality, target: after.target, downgraded: after.downgraded, drew };
+});
+check('looks: frames that cost more than they return step the chain down, and the world keeps drawing',
+  guard.downgraded && guard.target !== 'full' && guard.drew, guard);
 
 // ---- nothing threw ------------------------------------------------------------------------------
 const real = errs.filter(e => !/WebGL|GL_INVALID|swiftshader|GPU stall|Failed to load resource/i.test(e));

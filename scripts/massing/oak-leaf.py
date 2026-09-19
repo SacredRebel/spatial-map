@@ -1,11 +1,12 @@
 """
 The Oak Leaf — a massing model of the house proposed for Sulphur Mountain, at real size.
 
-  Three leaves on the knoll: a tall central leaf for the great room, its tip to the south over the
-  drive and its base opening north to the pool; two lower leaves splayed east (kitchen and dining,
-  by the outdoor fire) and west (the private lounge, toward the oaks). The heart is the river-stone
-  chimney of the house that stands here now — the great room is built around it, so the model's
-  origin IS that chimney, and everything is measured from it.
+  Three leaves on the knoll, laid out to the owner's own markup of the site. A tall central leaf
+  for the great room, its tip south over the drive where you arrive and its base opening north; a
+  leaf north-east for the kitchen and dining — the right-back corner; and a leaf south-east for the
+  private lounge, set out under the oaks. The heart is the river-stone chimney of the house that
+  stands here now — the great room is built around it, so the model's origin IS that chimney, and
+  everything is measured from it.
 
   Levels, in metres above the main floor (which sits at 425.9 m, the top of the knoll):
     -3.3  the lower floor: three suites cut into the south bank, each with a door onto the court
@@ -14,9 +15,14 @@ The Oak Leaf — a massing model of the house proposed for Sulphur Mountain, at 
      3.7  the loft over the north half of the great room: the master suite, open to below
      9.8  the ridge of the central leaf; the wings peak at 7.0
 
-  The plan is the owner's own marks on the aerial: the pool north-east, the outdoor fire east,
-  the oak lounge west, the sacred gardens along the bank to the south-west. Their positions are
-  those marks, read off the graticule to about three metres.
+  The outdoor rooms are the owner's five marked zones, and they are kept as OUTDOOR rooms: the
+  pool and deck back-left (north-west), the outdoor fire back-centre, the oak lounge south-east
+  under the standing oaks, the sacred gardens as a corridor along the east. None of them is
+  allowed to become building mass — that was the correction that made the composition read as a
+  house on a piece of land rather than a resort consuming it.
+
+  Every distance here is provisional until the owner's boundary arrives as real coordinates; the
+  massing is sized to sit inside the drawn envelope with room to spare rather than to fill it.
 
   Nothing here is a finished design. It is the shape at the right size on the right ground, so it
   can be walked around and argued with before anyone draws a wall for real.
@@ -178,26 +184,38 @@ def build():
     # ---- the three leaves ------------------------------------------------------------------
     central = Leaf('central', tip=(0, -15), base=(0, 11), width=13,
                    ridge=[(0, 5.8), (0.3, 7.6), (0.62, 9.8), (0.85, 8.4), (1.0, 5.6)], widest=0.62)
-    west = Leaf('west wing', tip=(-17.5, 5.6), base=(-3.5, 0.5), width=9.5,
-                ridge=[(0, 5.6), (0.35, 6.2), (0.75, 7.0), (1.0, 6.4)], widest=0.62)
-    east = Leaf('east wing', tip=(20.5, 9.2), base=(4.5, 1.5), width=9.5,
-                ridge=[(0, 5.6), (0.35, 6.2), (0.75, 7.0), (1.0, 6.4)], widest=0.62)
-    leaves = [central, west, east]
+    # FOUR wings, two to a side, the way an oak leaf actually lobes — and the way the owner's own
+    # reference boards draw it. Three leaves put both wings east and the composition went lopsided:
+    # everything reached one way and the west side was left as car park. Four balances it and gives
+    # each function the corner the owner asked for.
+    NE = Leaf('kitchen wing', tip=(16.5, 10.5), base=(4.0, 2.0), width=9.0,       # kitchen + dining, right-back
+              ridge=[(0, 5.6), (0.35, 6.2), (0.75, 7.0), (1.0, 6.4)], widest=0.62)
+    NW = Leaf('master wing', tip=(-14.5, 9.5), base=(-4.0, 2.0), width=9.0,       # master suite, over the pool side
+              ridge=[(0, 5.6), (0.35, 6.2), (0.75, 7.0), (1.0, 6.4)], widest=0.62)
+    SE = Leaf('lounge wing', tip=(15.5, -10.0), base=(4.0, -2.0), width=8.6,      # private lounge, under the oaks
+              ridge=[(0, 5.4), (0.35, 6.0), (0.75, 6.6), (1.0, 6.0)], widest=0.62)
+    SW = Leaf('suites wing', tip=(-15.0, -10.5), base=(-4.0, -2.0), width=8.6,    # over the suites and their cars
+              ridge=[(0, 5.4), (0.35, 6.0), (0.75, 6.6), (1.0, 6.0)], widest=0.62)
+    wings = [NE, NW, SE, SW]
+    leaves = [central] + wings
     for leaf in leaves: leaf_shell(m, leaf)
 
-    c_ring = central.outline(); w_ring = west.outline(); e_ring = east.outline()
-    c_xz, w_xz, e_xz = ring_xz(c_ring), ring_xz(w_ring), ring_xz(e_ring)
+    c_ring = central.outline()
+    c_xz = ring_xz(c_ring)
+    wing_rings = {w.name: w.outline() for w in wings}
+    wing_xz = {w.name: ring_xz(wing_rings[w.name]) for w in wings}
 
     # floors: a slab under each leaf, a hand wider than the wall line
-    for leaf, xz in ((central, c_xz), (west, w_xz), (east, e_xz)):
+    for leaf in leaves:
+        xz = c_xz if leaf is central else wing_xz[leaf.name]
         m.extrude(STONE_FLOOR, ring_xz(leaf.outline(v=0.92)), -0.4, 0.0)
         m.floor(xz, 0.0, f'{leaf.name} floor')
 
-    # walls: the central leaf opens at its tip (the entrance), its base (the north terrace), onto
-    # the roof terrace on the west flank, and wherever a wing joins; each wing opens at its tip
-    leaf_walls(m, central, doors=[(0, 0.1), (0.27, 0.36), (0.92, 1.0)], skip_inside=(w_xz, e_xz))
-    leaf_walls(m, west, doors=[(0, 0.12), (0.84, 1.0)], skip_inside=(c_xz,))
-    leaf_walls(m, east, doors=[(0, 0.12), (0.84, 1.0)], skip_inside=(c_xz,))
+    # walls: the central leaf opens at its tip (the entrance), at its base (the north terrace) and
+    # wherever a wing joins it; each wing opens at its tip and where it meets the spine
+    leaf_walls(m, central, doors=[(0, 0.1), (0.27, 0.36), (0.92, 1.0)], skip_inside=tuple(wing_xz.values()))
+    for w in wings:
+        leaf_walls(m, w, doors=[(0, 0.12), (0.84, 1.0)], skip_inside=(c_xz,))
 
     # ---- the chimney: the river-stone heart, standing where it stands today ----------------
     chim = circle(0, 0, 1.1, 12)
@@ -245,7 +263,7 @@ def build():
             m.extrude(BRONZE, rect(px - 0.1, -pn - 0.1, px + 0.1, -pn + 0.1), -3.5, -1.1)
     # the stair up, in the corridor, rising east
     stair(m, STONE_FLOOR, -8.0, 3.85, 0.6, 0, 1.1, 3.3 / 8, 8, -3.3, 'lower stair')
-    # the roof of the lower level west of the central leaf: a green terrace off the lounge
+    # the roof of the lower level west of the central leaf: a green terrace off the great room
     terr = ring_xz([(LX0, LN0), (-5.0, LN0), (-5.0, LN1), (LX0, LN1)])
     m.extrude(GREEN, terr, -0.4, 0.0)
     m.floor(terr, 0.0, 'roof terrace')
@@ -261,26 +279,35 @@ def build():
     terrace = ring_xz([(-7, 9.5), (7, 9.5), (7, 14), (-7, 14)])
     m.extrude(STONE_FLOOR, terrace, -0.25, 0.0)
     m.floor(terrace, 0.0, 'north terrace')
-    # the deck: a hand under the terrace, since the ground there is 424.3 to 425.6 m and the boards must clear it
-    stair(m, STONE_FLOOR, 3.5, -14.6, 0, 0.6, 4.0, 0.3, 1, -0.3, 'pool step')
-    deck = ring_xz([(1, 11), (25, 11), (25, 25), (1, 25)])
+    # The pool is BACK-LEFT — north-west — where the owner marked it in blue, not north-east where
+    # it used to sit. That one move is what puts the water in the afternoon shade of the big oak
+    # and leaves the whole north-east open for the kitchen leaf and the fire.
+    # The deck sits a hand under the terrace: the ground runs 424.3 to 425.6 m and the boards clear it.
+    stair(m, STONE_FLOOR, -7.5, -13.5, -0.6, 0, 4.0, 0.3, 1, -0.3, 'pool step')
+    DX0, DX1, DN0, DN1 = -25.0, -7.0, 13.0, 24.0
+    deck = ring_xz([(DX0, DN0), (DX1, DN0), (DX1, DN1), (DX0, DN1)])
     m.extrude(DECK, deck, -0.55, -0.3, lid=False)
     m.floor(deck, -0.3, 'pool deck')
-    pool = [(13 + 6.5 * math.cos(a) * (1 + 0.12 * math.sin(2 * a)), 18 + 3.6 * math.sin(a) * (1 + 0.15 * math.cos(a)))
+    pool = [(-16 + 5.2 * math.cos(a) * (1 + 0.12 * math.sin(2 * a)), 18.5 + 3.1 * math.sin(a) * (1 + 0.15 * math.cos(a)))
             for a in np.linspace(0, 2 * math.pi, 40, endpoint=False)]
     pool_xz = ring_xz(pool)
     # the deck top is four boards around the pool's box and a collar from the box in to the water's edge
-    bx0, bz0, bx1, bz1 = 5.0, -22.8, 21.0, -13.2
-    for r in (rect(1, -25, 25, bz0), rect(1, bz1, 25, -11), rect(1, bz0, bx0, bz1), rect(bx1, bz0, 25, bz1)): m.cap(DECK, r, -0.3)
+    bx0, bz0, bx1, bz1 = -22.0, -22.5, -10.0, -14.5
+    for r in (rect(DX0, -DN1, DX1, bz0), rect(DX0, bz1, DX1, -DN0), rect(DX0, bz0, bx0, bz1), rect(bx1, bz0, DX1, bz1)): m.cap(DECK, r, -0.3)
     m.collar(DECK, pool_xz, rect(bx0, bz0, bx1, bz1), -0.3)
     m.extrude(POOL_FLOOR, pool_xz, -2.1, -0.25, lid=False)                 # the basin, its coping a hand above the boards
     m.cap(WATER, pool_xz, -0.5, up=True)
     m.solid(pool_xz, -3.0, 0.2, 'pool')                                   # a body on the deck stays out of the basin
-    tub = circle(21.5, -15.5, 1.6, 24)
+    tub = circle(-8.8, -15.0, 1.6, 24)
     m.extrude(POOL_FLOOR, tub, -1.3, 0.15, lid=False); m.cap(WATER, tub, 0.0); m.solid(tub, -1.3, 0.15, 'hot tub')
 
-    # ---- the outdoor fire, east; the oak lounge, west --------------------------------------
-    for (cx, cn, y, mat, name) in ((20, 1, 0.0, STONE_FLOOR, 'fire terrace'), (-26, 1, -1.3, DECK, 'oak lounge')):
+    # ---- the outdoor fire, back-centre; the oak lounge, south-east under the trees ---------
+    #
+    #   Both were moved to the owner's marks. The fire (orange) sits north of the house, between
+    #   the pool deck and the kitchen leaf, so it is a place you walk out to rather than a thing
+    #   attached to a wing. The oak lounge (green) goes south-east, under the oaks that are
+    #   already standing there — the trees are the room, and the deck only gives them a floor.
+    for (cx, cn, y, mat, name) in ((3.5, 20.0, 0.0, STONE_FLOOR, 'fire terrace'), (13.0, -19.5, -1.3, DECK, 'oak lounge')):
         ring = circle(cx, -cn, 5.2, 36)
         m.extrude(mat, ring, y - 0.2, y); m.floor(ring, y, name)
         pit = circle(cx, -cn, 1.1, 16)
@@ -294,10 +321,42 @@ def build():
                     (sx + 0.25 * ux + 0.9 * vx, sz + 0.25 * uz + 0.9 * vz), (sx - 0.25 * ux + 0.9 * vx, sz - 0.25 * uz + 0.9 * vz)]
             m.extrude(DARK_STONE, seat, y, y + 0.45); m.solid(seat, y, y + 0.45, name + ' seat')
 
+    # ---- the sacred gardens: a corridor along the east, and nothing built in it -------------
+    #
+    #   The owner marked this in purple as a long strip running north to south down the east side,
+    #   outside the house. It stays that way. A walked path of decomposed granite, a few standing
+    #   stones, and planting either side — no mass, no roof, nothing the house can creep into.
+    #   Stepping stones rather than a ribbon: a path laid as separate pads takes the ground as it
+    #   finds it, which is what a garden walk does, and it cannot tilt or self-intersect the way a
+    #   single long band does.
+    GX = 26.0
+    for k, n in enumerate(np.linspace(-15, 15, 26)):
+        e = GX + 1.8 * math.sin(n / 6.0) + (0.45 if k % 2 else -0.45)
+        pad = circle(e, -n, 0.62, 10)
+        m.extrude(STONE_FLOOR, pad, -0.1, 0.06)
+        m.floor(pad, 0.06, 'garden stone')
+    for k, n in enumerate(np.linspace(-11, 11, 5)):              # standing stones along the walk
+        e = GX + 1.8 * math.sin(n / 6.0) + (2.6 if k % 2 else -2.6)
+        st = circle(e, -n, 0.42, 9)
+        h = 1.2 + 0.3 * (k % 3)
+        m.extrude(RIVER_STONE, st, 0.0, h)
+        m.solid(st, 0.0, h, 'standing stone')
+
+    # ---- the drive ---------------------------------------------------------------------------
+    #
+    #   "A car in front of each room" is what the owner asked for, and the apron already runs the
+    #   full length of the three suites to give it. It is carried a little further west so the
+    #   arrival is a drive along the house rather than a pocket at the end of one.
+    drive = ring_xz([(-22.0, -13.0), (-15.5, -13.0), (-15.5, -19.5), (-22.0, -19.5)])
+    m.extrude(CONCRETE, drive, -3.55, -3.46)
+    m.floor(drive, -3.46, 'drive')
+
     # the footprint the proposal occupies, for the registry: the three wall lines merged by hand
     # into one ring is more than a massing needs — the central leaf's ring plus the wings' rings
     # are handed over separately
-    return m, {'central': c_ring, 'west': w_ring, 'east': e_ring, 'pool': pool, 'lower': [(LX0, LN0), (LX1, LN0), (LX1, LN1), (LX0, LN1)]}
+    out = {'central': c_ring, 'pool': pool, 'lower': [(LX0, LN0), (LX1, LN0), (LX1, LN1), (LX0, LN1)]}
+    out.update(wing_rings)
+    return m, out
 
 
 if __name__ == '__main__':

@@ -95,6 +95,15 @@ export class Sky {
    * midday, rising as the sun drops, and held open through the night.
    */
   exposure = 1;
+  /**
+   * How much of the stand-in sky fill to keep.
+   *
+   *   The hemisphere light is an approximation of the sky: two colours and a lerp. Once the real
+   *   dome has been pre-filtered into an environment map, that approximation is being *added* to
+   *   the thing it was standing in for, and the shadows wash out. Looks pulls this down when it
+   *   has the real one.
+   */
+  skylightScale = 1;
   private mat: THREE.ShaderMaterial;
 
   constructor(radius = 30000) {
@@ -186,7 +195,7 @@ export class Sky {
     this.ambient.color.setRGB(this.zenith.r / zp, this.zenith.g / zp, this.zenith.b / zp, THREE.LinearSRGBColorSpace)
       .lerp(new THREE.Color().setRGB(this.horizon.r / hp, this.horizon.g / hp, this.horizon.b / hp, THREE.LinearSRGBColorSpace), 0.35);
     this.ambient.groundColor.set('#8a7f62');
-    this.ambient.intensity = 0.1 + SKYLIGHT_INTENSITY * day;
+    this.ambient.intensity = (0.1 + SKYLIGHT_INTENSITY * day) * this.skylightScale;
     this.exposure = 1 + 0.9 * (1 - THREE.MathUtils.smoothstep(p.altitude, -2, 30));
     return { pos: p, horizon: this.horizon, zenith: this.zenith };
   }

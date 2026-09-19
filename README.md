@@ -229,6 +229,19 @@ the generators at build time into `public/models`, so the model is served beside
 (`/models/oak-leaf-massing.glb`) and its row in the atlas's `data/structures.json` points there. A
 change to the design is a change to the script, never a hand edit of a mesh.
 
+**`scripts/massing/plan.py`** — a measured plan of a massing, drawn from the model rather than about
+it. Every line comes from the same walk floors and solids the world stands on, so a reader who scales
+a dimension off the drawing gets the truth; water reads as water, anything below the drawn floor is
+dashed, the roofs above are dashed, and it carries a scale bar, a north arrow and the level table.
+Output is one SVG with no dependencies. `node tests/svg2png.mjs plan.svg plan.png` rasterises it.
+
+**`world/looks.ts`** — how the light lands: ground-truth ambient occlusion over the frame, and the sky
+dome pre-filtered into an environment map so a wall is lit by the sky it stands under rather than by
+a guess. **Off unless asked for** — `?looks=auto|plain|full` — and the passes are fetched only when
+someone asks, so a world with the chain off pays nothing for it. The plain render is never taken
+away: anything that throws, and any machine that runs the chain slower than it is worth, falls back
+to exactly the renderer the world had before the file existed.
+
 **`edit/editor.ts`** — the pencil. Picking is a raycast against the record's instanced trees (the
 instance id maps back to the row of the record), the standing things and the structures, and for the
 ground a march along the ray against the height function, which is exact and needs no mesh. Every
@@ -243,6 +256,10 @@ one, voice out through its speech, the agent's proposals taken through the edito
 inside `HeightField.at()` after the tiles, with a smoothstep bank.
 
 ## Testing
+
+**Taking the pencil.** `?role=builder` (or `admin`) grants the tools for this browser — draw, place,
+shape, undo, all kept locally. Saving to the atlas still wants a PIN, which is where the gate always
+belonged; drawing on your own screen was never the thing that needed protecting.
 
 `npm test` serves a **synthetic hillside** — a tilted plane, base 500 m, rising 5 % east and falling
 3 % north, encoded exactly the way the atlas encodes 3DEP — and drives the real built app against
