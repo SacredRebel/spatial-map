@@ -81,24 +81,39 @@ check('terrain: the fine ring is one indexed, vertex-coloured grid carrying the 
 // holding a key for a wall-clock second would measure the renderer rather than the walker
 const walk = await page.evaluate(() => {
   const w = window.world, p = w.player;
+  // a body leans into its walk now, so the measured second starts once the stride has settled
   const step = (keys, dt, heading) => {
     w.goto(-119.156345, 34.432675, heading);
-    const a = p.state();
     for (const k of keys) p.key(k, true);
+    p.update(0.8);
+    const a = p.state();
     p.update(dt);
     for (const k of keys) p.key(k, false);
     return { a, b: p.state() };
   };
-  return { north: step(['w'], 1, 0), run: step(['w', 'shift'], 1, 0), east: step(['w'], 1, 90), strafe: step(['d'], 1, 0) };
+  // and the lean itself: from a standstill, an eighth of a second covers noticeably less than
+  // an instant-speed walker's 0.20 m, because the acceleration is real
+  w.goto(-119.156345, 34.432675, 0);
+  const s0 = p.state();
+  p.key('w', true); p.update(0.125); p.key('w', false);
+  const stride = { a: s0, b: p.state() };
+  p.update(2);   // come to rest before the next section
+  return { north: step(['w'], 1, 0), run: step(['w', 'shift'], 1, 0), east: step(['w'], 1, 90), strafe: step(['d'], 1, 0), stride };
 });
 const metres = (r) => ({ n: (r.b.lat - r.a.lat) * MY, e: (r.b.lng - r.a.lng) * MX });
 const n1 = metres(walk.north), r1 = metres(walk.run), e1 = metres(walk.east), s1 = metres(walk.strafe);
-check('walk: a second of W covers 1.6 m along the heading — north when facing north, east when facing east',
+check('walk: a settled second of W covers 1.6 m along the heading — north when facing north, east when facing east',
   Math.abs(n1.n - 1.6) < 0.02 && Math.abs(n1.e) < 0.02 && Math.abs(e1.e - 1.6) < 0.02 && Math.abs(e1.n) < 0.02,
   { north: +n1.n.toFixed(2), east: +e1.e.toFixed(2) });
 check('walk: Shift runs at 5.2 m/s, and D strafes right without turning',
   Math.abs(r1.n - 5.2) < 0.05 && Math.abs(s1.e - 1.6) < 0.02 && Math.abs(s1.n) < 0.02,
   { run: +r1.n.toFixed(2), strafeEast: +s1.e.toFixed(2) });
+const strideM = metres(walk.stride).n;
+check('walk: the first stride leans in — an eighth of a second from standstill covers less than an instant start would',
+  strideM > 0.02 && strideM < 0.17,
+  { strideM: +strideM.toFixed(3), instantWouldBe: 0.2 });
+check('walk: going along the slope the feet keep the ground — no flicker of falling on a downhill step',
+  walk.north.b.grounded === true, { grounded: walk.north.b.grounded });
 
 const walkEnd = walk.north.b;
 
@@ -290,8 +305,9 @@ const thumb = await page.evaluate(() => {
   const w = window.world, p = w.player;
   const run = (fwd) => {
     w.goto(-119.156345, 34.432675, 0);
-    const a = p.state();
     p.setAxis(fwd, 0, false);
+    p.update(0.8);                       // lean into the stride first, as the keys do
+    const a = p.state();
     p.update(1);
     p.setAxis(0, 0, false);
     return (p.state().lat - a.lat);
@@ -303,6 +319,25 @@ const thumb = await page.evaluate(() => {
 check('thumbstick: a full stick walks 1.6 m and half a stick walks half of it, through the same axis as the keys',
   Math.abs(thumb.full * MY - 1.6) < 0.02 && Math.abs(thumb.half * MY - 0.8) < 0.02 && thumb.hasStick,
   { fullM: +(thumb.full * MY).toFixed(2), halfM: +(thumb.half * MY).toFixed(2) });
+
+// ---- the jump's manners -------------------------------------------------------------------------
+// A press just before landing is not lost: it is kept for a seventh of a second and fires the
+// moment the feet touch (the buffer). JUMP 5.4 against GRAVITY 18 is 0.6 s of air.
+const rebound = await page.evaluate(() => {
+  const w = window.world, p = w.player;
+  w.goto(-119.156345, 34.432675, 0);
+  p.jump();
+  p.update(0.5);                                  // most of the arc: still airborne
+  const stillAir = !p.state().grounded;
+  p.key(' ', true); p.update(0.04); p.key(' ', false);   // pressed in the air, just before touch-down
+  p.update(0.2);                                  // lands inside this window — and leaves again
+  const after = p.state();
+  p.update(2);                                    // settle
+  return { stillAir, rebounded: !after.grounded && after.heightM > 0, heightM: after.heightM };
+});
+check('jump: a press just before landing is kept and fires on touch-down instead of being swallowed',
+  rebound.stillAir && rebound.rebounded,
+  { stillAirAtHalfSecond: rebound.stillAir, reboundHeightM: +rebound.heightM.toFixed(2) });
 
 // ---- the character ------------------------------------------------------------------------------
 // A missing or broken avatar file must never leave the world without a body.

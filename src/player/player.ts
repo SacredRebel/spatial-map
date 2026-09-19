@@ -33,6 +33,16 @@ const PITCH_MIN = -1.15, PITCH_MAX = 0.9;
 const FLY_PITCH = 1.5, FLY_SPEED = 12, FLY_MIN = 2, FLY_MAX = 120, FLY_FAST = 4;
 const SUBSTEP = 1 / 20;            // the physics runs at 20 Hz however fast the page draws
 const STEP_UP = 0.55;              // a slab, a step, a deck edge: taken in stride; anything higher wants stairs
+// The stride. A body does not reach full speed in a frame: it leans into the walk and eases out
+// of it. These are the manners of the classic character controllers — the floating-capsule feel
+// of ecctrl, the slope limits and surface clamping of the SuperCharacterController — redone in
+// this world's idiom, where the ground is a function and there is no physics engine to ask.
+const ACCEL = 11;                  // m/s² toward the wanted velocity; full walk in a sixth of a second
+const AIR_STEER = 0.3;             // in the air the legs have nothing to push on: steering is a third
+const SNAP = 0.5;                  // going downhill the feet keep the ground within half a metre — no flicker of falling
+const SLOPE_MAX = 1.2;             // rise over run beyond ~50°: a bank that steep is a wall, and wants its stairs
+const COYOTE = 0.12;               // a jump just after the edge still belongs to the ground
+const BUFFER = 0.14;               // a jump pressed just before landing is kept and fires on touch-down
 
 export type View = 'third' | 'first';
 export type Mode = 'walk' | 'fly';
@@ -78,6 +88,8 @@ export class Player {
   private travelled = 0;
   private lastTravelled = 0;
   private touching: string | null = null;
+  private airTime = 0;               // seconds since the feet last had ground — the coyote window
+  private jumpWish = 0;              // seconds left on a jump pressed in the air — the buffer
   onChange: (s: PlayerState) => void = () => {};
 
   constructor(
@@ -231,8 +243,12 @@ export class Player {
     this.axis.run = run;
   }
 
-  /** jump from a button rather than the space bar */
-  jump() { if (this.grounded) { this.vel.y = JUMP; this.grounded = false; } }
+  /** jump from a button rather than the space bar — the edge forgives a late press (coyote time) */
+  jump() {
+    if (this.grounded || (this.airTime < COYOTE && this.vel.y <= 0.01)) {
+      this.vel.y = JUMP; this.grounded = false; this.airTime = COYOTE;
+    } else { this.jumpWish = BUFFER; }
+  }
 
   // ---- the step ------------------------------------------------------------------------------
   /**
@@ -297,18 +313,40 @@ export class Player {
     side = THREE.MathUtils.clamp(side, -1, 1);
 
     const speed = (this.keys.has('shift') || this.axis.run) ? RUN : WALK;
-    const before = { x: this.pos.x, z: this.pos.z };
+    const before = { x: this.pos.x, y: this.pos.y, z: this.pos.z };
+
+    // the wanted velocity — where the input points, at the chosen speed
+    let tx = 0, tz = 0;
     if (fwd || side) {
       const len = Math.max(1, Math.hypot(fwd, side));   // analog: half a stick is half a walk
       const sin = Math.sin(this.yaw), cos = Math.cos(this.yaw);
       // a body with rotation.y = yaw faces (-sin, 0, -cos) and its right hand is (cos, 0, -sin),
       // so at yaw 0 forward is -z, which is north in this frame
-      const dx = (fwd * -sin + side * cos) / len * speed;
-      const dz = (fwd * -cos + side * -sin) / len * speed;
-      this.pos.x += dx * d;
-      this.pos.z += dz * d;
-      this.vel.x = dx; this.vel.z = dz;
-    } else { this.vel.x = this.vel.z = 0; }
+      tx = (fwd * -sin + side * cos) / len * speed;
+      tz = (fwd * -cos + side * -sin) / len * speed;
+    }
+    // and the stride toward it: the legs push on the ground, or on much less in the air
+    const steer = ACCEL * (this.grounded ? 1 : AIR_STEER) * d;
+    const dvx = tx - this.vel.x, dvz = tz - this.vel.z;
+    const want = Math.hypot(dvx, dvz);
+    if (want <= steer) { this.vel.x = tx; this.vel.z = tz; }
+    else { this.vel.x += dvx / want * steer; this.vel.z += dvz / want * steer; }
+    this.pos.x += this.vel.x * d;
+    this.pos.z += this.vel.z * d;
+
+    // a bank steeper than the legs can climb is a wall, not a hill: the move is refused and the
+    // walk stops at its foot — the way in is the stairs, as it would be on the land
+    if (this.grounded) {
+      const horiz = Math.hypot(this.pos.x - before.x, this.pos.z - before.z);
+      if (horiz > 1e-4) {
+        const sll = this.frame.toLngLat(this.pos.x, this.pos.z);
+        const rise = this.field.atOr(sll.lng, sll.lat, this.ground) - before.y;
+        if (rise > 0.04 && rise / horiz > SLOPE_MAX) {
+          this.pos.x = before.x; this.pos.z = before.z;
+          this.vel.x = this.vel.z = 0;
+        }
+      }
+    }
 
     const hit = this.solids.length ? resolve(this.pos, SHOULDER, this.solids) : null;
     this.touching = hit ? hit.id : null;
@@ -321,10 +359,23 @@ export class Player {
       if (f.top > this.ground && f.top <= this.pos.y + STEP_UP && inRing(this.pos.x, this.pos.z, f.ring)) this.ground = f.top;
     }
 
-    if (this.keys.has(' ') && this.grounded) { this.vel.y = JUMP; this.grounded = false; }
+    // a jump: from the ground, from the edge just left (coyote), or kept from a press in the air (buffer)
+    const pressed = this.keys.has(' ');
+    if ((pressed || this.jumpWish > 0) && (this.grounded || (this.airTime < COYOTE && this.vel.y <= 0.01))) {
+      this.vel.y = JUMP; this.grounded = false; this.airTime = COYOTE; this.jumpWish = 0;
+    } else if (pressed && !this.grounded) this.jumpWish = BUFFER;
+    this.jumpWish = Math.max(0, this.jumpWish - d);
+
+    // downhill the feet keep the surface instead of leaving it every substep: a small drop is a
+    // step taken, not a fall begun (the SuperCharacterController's ground clamping)
+    if (this.grounded && this.vel.y <= 0 && this.pos.y > this.ground && this.pos.y - this.ground <= SNAP) {
+      this.pos.y = this.ground; this.vel.y = 0;
+    }
+
     this.vel.y += GRAVITY * d;
     this.pos.y += this.vel.y * d;
     if (this.pos.y <= this.ground) { this.pos.y = this.ground; this.vel.y = 0; this.grounded = true; }
+    this.airTime = this.grounded ? 0 : this.airTime + d;
   }
 
   /** put the body and the camera where the state says they are */
