@@ -52,7 +52,8 @@ const DEFAULT_ATLAS = 'https://eco-village-map.vercel.app';
 interface Community { name: string; pid: string; lng: number; lat: number; heading: number; tz: string }
 const TZ = 'America/Los_Angeles';
 const COMMUNITIES: Record<string, Community> = {
-  'sulphur-mountain': { name: 'Sulphur Mountain', pid: 'sulphur-mountain', lng: -119.156345, lat: 34.432675, heading: 200, tz: TZ },
+  // on E Big Canyon Rd, 4 m in from the centreline, looking north at the house: you arrive where a visitor arrives
+  'sulphur-mountain': { name: 'Sulphur Mountain', pid: 'sulphur-mountain', lng: -119.1553869, lat: 34.4329197, heading: 14, tz: TZ },
   'howard': { name: 'Howard', pid: 'howard', lng: -119.319741, lat: 34.424183, heading: 180, tz: TZ },
   'keris-property': { name: "Keri's", pid: 'keris-property', lng: -119.331364, lat: 34.433173, heading: 180, tz: TZ },
   'chers-property': { name: "Cher's", pid: 'chers-property', lng: -119.288871, lat: 34.402005, heading: 180, tz: TZ }
