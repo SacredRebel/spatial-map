@@ -97,7 +97,18 @@ const remember = {
 };
 // the community's own character walks by default — a chosen or remembered body still wins,
 // and if the file is missing the built-in body steps in without a word
-const DEFAULT_AVATAR = '/avatar/eco-steward.glb';
+/**
+ * The body the world opens with.
+ *
+ *   It is the BUILT-IN one, deliberately. A .glb from a mesh generator is usually a single skinless
+ *   shape — no skeleton, nothing to bend — and the gait, finding no joints, slides it over the
+ *   ground like furniture. Worse, the file it used to point at was never in the repository, so in
+ *   production it was a 404 and the world fell back to the built-in body anyway, silently. The
+ *   built-in body is made joint by joint and actually walks. Paste any RIGGED .glb or .vrm into
+ *   the character panel and it takes over, and the panel now says plainly when a model has no
+ *   skeleton instead of leaving someone to wonder why their character glides.
+ */
+const DEFAULT_AVATAR: string | null = null;
 const avatarUrl = qs.get('avatar') ?? remember.get('avatar') ?? DEFAULT_AVATAR;
 const lookScale0 = Math.min(2, Math.max(0.4, Number(remember.get('look')) || 1));
 const camDist0 = Math.min(14, Math.max(1.6, Number(remember.get('camdist')) || 6.4));
@@ -242,10 +253,22 @@ async function signIn() {
     editor.refresh();
     return;
   }
-  const pin = window.prompt('Your PIN — a builder proposes, an admin decides:');
-  if (!pin) return;
-  const role = await roleFor(atlas, pin.trim());
-  if (!role) { window.alert('That PIN is not known to the atlas.'); return; }
+  const pin = window.prompt('Your PIN — a builder proposes, an admin decides.\n\nLeave it blank to take the tools for this browser only.');
+  if (pin === null) return;
+  // A blank PIN, or one the atlas does not know, is the common case and it used to be a dead end:
+  // an alert, and a world you could only look at. The tools themselves were never the secret —
+  // saving is. So offer them locally and say exactly what that does and does not buy.
+  const role = pin.trim() ? await roleFor(atlas, pin.trim()) : null;
+  if (!role) {
+    const why = pin.trim() ? 'That PIN is not known to the atlas.\n\n' : '';
+    if (!window.confirm(`${why}Take the builder tools for THIS BROWSER instead?\n\nYou can draw, place, shape and undo, and the work is kept here. Saving to the atlas still needs a PIN.`)) return;
+    session = { role: 'builder', pin: null };
+    saveSession(session);
+    hud.setRole(session.role, caps().edit);
+    hud.setNotice('builder for this browser — draw, place and shape freely. Saving to the atlas still needs a PIN.');
+    editor.refresh();
+    return;
+  }
   session = { role, pin: pin.trim() };
   saveSession(session);
   hud.setRole(session.role, caps().edit);
@@ -428,7 +451,7 @@ async function boot() {
   if (avatarUrl) {
     const rig = await loadAvatar(avatarUrl);
     player.setRig(rig);
-    hud.setAvatar(rig.kind);
+    hud.setAvatar(rig.kind, rig.boneCount);
   }
 }
 
@@ -544,7 +567,7 @@ const api = {
   setAvatar: async (url: string | null) => {
     const rig = await loadAvatar(url);
     player.setRig(rig);
-    hud.setAvatar(rig.kind);
+    hud.setAvatar(rig.kind, rig.boneCount);
     return rig.kind;
   }
 };

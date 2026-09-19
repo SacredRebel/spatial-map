@@ -61,6 +61,8 @@ export interface RigInput {
 export interface AvatarRig {
   readonly object: THREE.Object3D;
   readonly kind: 'capsule' | 'vrm' | 'gltf';
+  /** how many of the gait's joints this body actually has; 0 means it cannot be made to walk */
+  readonly boneCount: number;
   /** the last pose applied — the tests read this rather than inspecting the scene graph */
   readonly pose: Pose;
   update(i: RigInput): void;
@@ -89,6 +91,8 @@ function limb(len: number, r0: number, r1: number, colour: string): THREE.Group 
 export class CapsuleRig implements AvatarRig {
   readonly object = new THREE.Group();
   readonly kind = 'capsule' as const;
+  /** the built-in body is made joint by joint, so every joint the gait asks for is there */
+  readonly boneCount = 8;
   pose: Pose = gait(0, 0, false);
   private hips = new THREE.Group();
   private torso = new THREE.Group();
@@ -210,6 +214,15 @@ export function findBones(root: THREE.Object3D): BoneSet {
 export class BoneRig implements AvatarRig {
   readonly object: THREE.Object3D;
   readonly kind: 'vrm' | 'gltf';
+  /**
+   * How many of the bones the gait drives were actually found in this model.
+   *
+   *   A .glb exported from a mesh generator is often a single skinless shape: beautiful, and with
+   *   nothing inside it to bend. The gait then runs, finds no joints, and the character slides
+   *   across the ground like furniture. That is not a bug to hunt for an hour — it is a property
+   *   of the file, and the world should say so rather than let someone wonder.
+   */
+  readonly boneCount: number;
   pose: Pose = gait(0, 0, false);
   private phase = 0;
   private rest = new Map<THREE.Object3D, THREE.Quaternion>();
@@ -220,6 +233,7 @@ export class BoneRig implements AvatarRig {
     this.object = object;
     this.kind = kind;
     for (const b of Object.values(bones)) if (b) this.rest.set(b, b.quaternion.clone());
+    this.boneCount = this.rest.size;
     object.traverse(o => { const m = o as THREE.Mesh; if (m.isMesh) { m.castShadow = true; m.receiveShadow = true; } });
   }
 

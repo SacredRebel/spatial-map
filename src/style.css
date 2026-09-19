@@ -205,3 +205,6 @@ canvas { display: block; touch-action: none; }
 .st-note { flex: 1; font: 500 11px var(--mono); color: var(--violet); }
 .st-note[hidden] { visibility: hidden; }
 .st-frame { flex: 1; border: 0; width: 100%; background: #0e1210; }
+
+/* a line that is telling you something is wrong with what you asked for, not with the world */
+.warn { color: #e0a24a; }

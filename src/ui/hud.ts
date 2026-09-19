@@ -186,11 +186,15 @@ export class Hud {
     this.packLine.textContent = text ?? '';
   }
 
-  /** say which body is walking, once a real character has loaded */
-  setAvatar(kind: 'capsule' | 'vrm' | 'gltf') {
+  /** say which body is walking, once a real character has loaded — and whether it can walk */
+  setAvatar(kind: 'capsule' | 'vrm' | 'gltf', boneCount = 8) {
+    const boneless = kind !== 'capsule' && boneCount === 0;
     this.avatarLine.hidden = kind === 'capsule';
-    this.avatarLine.textContent = kind === 'vrm' ? 'VRM avatar' : kind === 'gltf' ? 'glTF avatar' : '';
-    this.q('[data-el="c-kind"]').textContent = kind === 'vrm' ? 'a VRM avatar' : kind === 'gltf' ? 'a glTF avatar' : 'the built-in body';
+    this.avatarLine.textContent = boneless ? 'no skeleton — it slides' : kind === 'vrm' ? 'VRM avatar' : kind === 'gltf' ? 'glTF avatar' : '';
+    this.avatarLine.classList.toggle('warn', boneless);
+    this.q('[data-el="c-kind"]').textContent = boneless
+      ? `${kind === 'vrm' ? 'a VRM' : 'a glTF'} model with NO SKELETON — it will slide rather than walk`
+      : kind === 'vrm' ? 'a VRM avatar' : kind === 'gltf' ? 'a glTF avatar' : 'the built-in body';
   }
 
   /** say who is here: a member, a builder, an admin */

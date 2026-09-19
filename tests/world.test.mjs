@@ -1191,6 +1191,44 @@ const noon = sun.find(s => s.h === 12), night = sun.find(s => s.h === 23), dawn 
 check('sun: at local noon it is high and to the south, at dawn it is low and east, at 23:00 it is down',
   noon.y > 0.55 && noon.z > 0 && dawn.x > 0.4 && dawn.y < 0.45 && night.y <= 0.03, { noon, dawn, night });
 
+// ---- the body that opens the world -----------------------------------------------------------
+// A character that slides over the ground instead of walking is the single most noticeable thing
+// wrong with a world, and it happens quietly: a .glb from a mesh generator has no skeleton, the
+// gait finds no joints, and nobody is told. So the world opens with the built-in body, which has
+// joints, and it says out loud when a model it is handed does not.
+const body = await page.evaluate(async () => {
+  const w = window.world;
+  const before = { kind: w.player.rig.kind, bones: w.player.rig.boneCount };
+  const kind = await w.setAvatar(`${location.origin}/models/fixture-house.glb`);   // a shape with no skeleton
+  const after = { kind, bones: w.player.rig.boneCount, said: document.querySelector('[data-el="c-kind"]')?.textContent || '' };
+  await w.setAvatar(null);
+  return { before, after, back: w.player.rig.kind };
+});
+check('character: the world opens with a body that has joints, so it walks rather than slides',
+  body.before.kind === 'capsule' && body.before.bones > 0 && body.back === 'capsule', body.before);
+check('character: a model with no skeleton is named as one instead of quietly gliding',
+  body.after.kind === 'gltf' && body.after.bones === 0 && /NO SKELETON/.test(body.after.said), body.after);
+
+// ---- taking the pencil without a PIN ----------------------------------------------------------
+// The tools were gated behind a PIN the atlas checks, and if nobody has set one there is no PIN
+// that works: B does nothing and the world is a thing you can only look at. The tools were never
+// the secret — saving is — so a blank PIN offers them for this browser and says what that buys.
+const pencil = await page.evaluate(async () => {
+  const w = window.world;
+  w.setSession({ role: 'member', pin: null });
+  const prompt = window.prompt, confirm = window.confirm;
+  window.prompt = () => '';          // blank: "no PIN"
+  window.confirm = () => true;       // yes, take them locally
+  document.querySelector('[data-el="role"]').click();
+  await new Promise(r => setTimeout(r, 400));
+  const got = { role: w.session.role, pin: w.session.pin, notice: document.querySelector('[data-el="notice"]')?.textContent || '' };
+  window.prompt = prompt; window.confirm = confirm;
+  return got;
+});
+check('pencil: a blank PIN offers the tools for this browser, and says saving still needs one',
+  pencil.role === 'builder' && pencil.pin === null && /Saving to the atlas still needs a PIN/.test(pencil.notice), pencil);
+await page.evaluate(() => window.world.setSession({ role: 'admin', pin: '4242' }));
+
 // ---- how the light lands -------------------------------------------------------------------------
 // The occlusion and the sky-lit ambient are an addition, never a condition. Three things must hold:
 // the chain builds, the sky becomes the light, and a machine that cannot afford it still sees the
