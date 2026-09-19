@@ -339,6 +339,40 @@ check('jump: a press just before landing is kept and fires on touch-down instead
   rebound.stillAir && rebound.rebounded,
   { stillAirAtHalfSecond: rebound.stillAir, reboundHeightM: +rebound.heightM.toFixed(2) });
 
+// ---- the character panel ------------------------------------------------------------------------
+// The character has a home in the HUD: the body, the camera and every control in one panel.
+const charPanel = await page.evaluate(() => {
+  const btn = document.querySelector('[data-act="char"]');
+  const panel = document.querySelector('[data-el="charpanel"]');
+  const openedBefore = panel && !panel.hidden;
+  btn.click();
+  const open = panel && !panel.hidden;
+  const text = panel ? panel.textContent : '';
+  // the camera sliders drive the player and are remembered for next visit
+  const dist = document.querySelector('[data-el="c-dist"]');
+  dist.value = '9.8'; dist.dispatchEvent(new Event('input'));
+  const look = document.querySelector('[data-el="c-look"]');
+  look.value = '1.6'; look.dispatchEvent(new Event('input'));
+  let saved = null; try { saved = { look: localStorage.getItem('world.look'), dist: localStorage.getItem('world.camdist') }; } catch { saved = null; }
+  const p = window.world;
+  document.querySelector('[data-act="charclose"]').click();
+  const closed = panel.hidden;
+  return {
+    openedBefore, open, closed,
+    hasControls: /W A S D/.test(text) && /flying/i.test(text) && /editing/i.test(text) && /jump/i.test(text),
+    hasBody: /built-in body/.test(text), hasSliders: !!dist && !!look,
+    playerLook: p.player.lookScale, playerDist: p.player.camDist,
+    saved
+  };
+});
+check('character: the panel opens from the HUD with the body, the camera and every control in it',
+  !charPanel.openedBefore && charPanel.open && charPanel.closed && charPanel.hasControls && charPanel.hasBody && charPanel.hasSliders,
+  { open: charPanel.open, controls: charPanel.hasControls });
+check('character: the sliders drive the player now and the choices are remembered for the next visit',
+  Math.abs(charPanel.playerLook - 1.6) < 0.01 && Math.abs(charPanel.playerDist - 9.8) < 0.01 &&
+  charPanel.saved && charPanel.saved.look === '1.6' && charPanel.saved.dist === '9.8',
+  { look: charPanel.playerLook, dist: charPanel.playerDist, saved: charPanel.saved });
+
 // ---- the character ------------------------------------------------------------------------------
 // A missing or broken avatar file must never leave the world without a body.
 const fallback = await page.evaluate(() => window.world.setAvatar('/no-such-avatar.vrm'));

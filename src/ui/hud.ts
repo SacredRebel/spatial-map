@@ -23,6 +23,15 @@ export interface HudOpts {
   onEdit: () => void;
   /** the role button: sign in with a PIN, or sign out */
   onRole: () => void;
+  /** the character panel: pick a body by URL (null = the built-in capsule); resolves to what loaded */
+  onAvatar: (url: string | null) => Promise<'capsule' | 'vrm' | 'gltf'>;
+  /** look sensitivity, 0.4–2, and how far back the third-person camera sits */
+  onLook: (scale: number) => void;
+  onCamDist: (d: number) => void;
+  /** where those two start (remembered from last time) */
+  look: number;
+  camDist: number;
+  avatarUrl: string | null;
 }
 
 export class Hud {
@@ -42,8 +51,9 @@ export class Hud {
     this.root.className = 'hud';
     this.root.innerHTML = `
       <header class="hud-top">
-        <div class="brand"><span class="mark">◈</span><b>${esc(o.community)}</b><span class="sub">walkable world · v0.10.0</span></div>
+        <div class="brand"><span class="mark">◈</span><b>${esc(o.community)}</b><span class="sub">walkable world · v0.11.1</span></div>
         <div class="acts">
+          <button class="btn" data-act="char" data-el="char" title="the character: body, camera, controls">🧍 character</button>
           <button class="btn" data-act="view" title="first / third person (C)">👤 view</button>
           <button class="btn" data-act="fly" data-el="fly" title="fly / walk (G)">🕊 fly</button>
           <button class="btn" data-act="edit" data-el="edit" title="edit the world (B)">✎ edit</button>
@@ -51,6 +61,42 @@ export class Hud {
           <button class="btn" data-act="recentre" title="back to the start">⌖ recentre</button>
         </div>
       </header>
+      <aside class="char" data-el="charpanel" hidden>
+        <div class="c-head"><b>The character</b><button class="btn c-close" data-act="charclose" title="close">✕</button></div>
+        <div class="c-sec">
+          <div class="c-title">the body</div>
+          <div class="c-row"><span>walking as</span><b data-el="c-kind">built-in body</b></div>
+          <label class="c-row c-url"><span>avatar file</span>
+            <input type="url" data-el="c-avatar" placeholder="https://… .vrm or .glb" spellcheck="false">
+          </label>
+          <div class="c-btns">
+            <button class="btn" data-act="charapply">use this body</button>
+            <button class="btn" data-act="charreset">built-in body</button>
+          </div>
+          <div class="c-note" data-el="c-note" hidden></div>
+        </div>
+        <div class="c-sec">
+          <div class="c-title">the camera</div>
+          <button class="btn c-wide" data-act="charview">👤 first / third person <b>C</b></button>
+          <label class="c-slider"><span>camera distance <b data-el="c-distv"></b></span>
+            <input type="range" min="1.6" max="14" step="0.2" data-el="c-dist"></label>
+          <label class="c-slider"><span>look sensitivity <b data-el="c-lookv"></b></span>
+            <input type="range" min="0.4" max="2" step="0.1" data-el="c-look"></label>
+        </div>
+        <div class="c-sec">
+          <div class="c-title">the controls</div>
+          <div class="c-keys">
+            <div><i>on foot</i> <b>W A S D</b> move · <b>Shift</b> run · <b>Space</b> jump · <b>Q E</b> turn · <b>C</b> view · drag or click to look · wheel zooms</div>
+            <div><i>flying (G)</i> <b>Space</b> up · <b>X</b> down · <b>Shift</b> fast · wheel sets speed · <b>G</b> lands</div>
+            <div><i>editing (B)</i> click to place · <b>1–9, 0</b> tools · <b>L F R O</b> wall floor roof opening · <b>Ctrl Z</b> undo</div>
+            <div><i>touch</i> left thumbstick walks · a finger looks · buttons jump and fly</div>
+          </div>
+        </div>
+        <div class="c-sec">
+          <div class="c-title">the manners</div>
+          <div class="c-keys"><div>walks 1.6 m/s, runs 5.2 · leans into the stride · steps to 0.55 m in stride · a bank past ~50° wants its stairs · downhill the feet keep the ground · the jump forgives the edge (0.12 s) and keeps a press before landing (0.14 s)</div></div>
+        </div>
+      </aside>
       <div class="time">
         <label>
           <span class="t-label">time of day <b data-el="clock">12:00</b></span>
@@ -77,6 +123,35 @@ export class Hud {
     this.q('[data-act="fly"]').addEventListener('click', () => o.onFly());
     this.q('[data-act="edit"]').addEventListener('click', () => o.onEdit());
     this.q('[data-act="role"]').addEventListener('click', () => o.onRole());
+
+    // the character panel — the body, the camera and every control, where the character lives
+    const panel = this.q('[data-el="charpanel"]');
+    const note = this.q('[data-el="c-note"]');
+    const avatarIn = this.q('[data-el="c-avatar"]') as HTMLInputElement;
+    avatarIn.value = o.avatarUrl ?? '';
+    this.q('[data-act="char"]').addEventListener('click', () => { panel.hidden = !panel.hidden; });
+    this.q('[data-act="charclose"]').addEventListener('click', () => { panel.hidden = true; });
+    this.q('[data-act="charview"]').addEventListener('click', () => o.onView());
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && !panel.hidden) panel.hidden = true; });
+    const say = (t: string | null) => { note.hidden = !t; note.textContent = t ?? ''; };
+    const apply = async (url: string | null) => {
+      say(url ? 'loading the body…' : null);
+      const kind = await o.onAvatar(url);
+      if (url && kind === 'capsule') say('that file would not load — the built-in body walks instead');
+      else say(null);
+    };
+    this.q('[data-act="charapply"]').addEventListener('click', () => { const v = avatarIn.value.trim(); void apply(v || null); });
+    this.q('[data-act="charreset"]').addEventListener('click', () => { avatarIn.value = ''; void apply(null); });
+    const dist = this.q('[data-el="c-dist"]') as HTMLInputElement;
+    const distV = this.q('[data-el="c-distv"]');
+    dist.value = String(o.camDist);
+    distV.textContent = `${o.camDist.toFixed(1)} m`;
+    dist.addEventListener('input', () => { distV.textContent = `${Number(dist.value).toFixed(1)} m`; o.onCamDist(Number(dist.value)); });
+    const look = this.q('[data-el="c-look"]') as HTMLInputElement;
+    const lookV = this.q('[data-el="c-lookv"]');
+    look.value = String(o.look);
+    lookV.textContent = `${o.look.toFixed(1)}×`;
+    look.addEventListener('input', () => { lookV.textContent = `${Number(look.value).toFixed(1)}×`; o.onLook(Number(look.value)); });
     const time = this.q('[data-el="time"]') as HTMLInputElement;
     this.clock.textContent = `${pad(o.hours)}:${pad((o.hours % 1) * 60)}`;
     time.addEventListener('input', () => {
@@ -111,6 +186,7 @@ export class Hud {
   setAvatar(kind: 'capsule' | 'vrm' | 'gltf') {
     this.avatarLine.hidden = kind === 'capsule';
     this.avatarLine.textContent = kind === 'vrm' ? 'VRM avatar' : kind === 'gltf' ? 'glTF avatar' : '';
+    this.q('[data-el="c-kind"]').textContent = kind === 'vrm' ? 'a VRM avatar' : kind === 'gltf' ? 'a glTF avatar' : 'the built-in body';
   }
 
   /** say who is here: a member, a builder, an admin */

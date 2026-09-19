@@ -86,7 +86,14 @@ const num = (key: string, fallback: number, lo: number, hi: number): number => {
   return isFinite(v) && v >= lo && v <= hi ? v : fallback;
 };
 const startHours = num('t', 13.5, 0, 24);   // early afternoon reads the land best
-const avatarUrl = qs.get('avatar');
+// the character remembers itself: the body, the camera and the hand come back next visit
+const remember = {
+  get: (k: string) => { try { return localStorage.getItem('world.' + k); } catch { return null; } },
+  set: (k: string, v: string | null) => { try { v == null ? localStorage.removeItem('world.' + k) : localStorage.setItem('world.' + k, v); } catch { /* private windows forget */ } }
+};
+const avatarUrl = qs.get('avatar') ?? remember.get('avatar');
+const lookScale0 = Math.min(2, Math.max(0.4, Number(remember.get('look')) || 1));
+const camDist0 = Math.min(14, Math.max(1.6, Number(remember.get('camdist')) || 6.4));
 const plantDensity = num('plants', 1, 0, 2);
 const packParam = qs.get('pack');
 const packUrl = packParam === '0' || packParam === 'none' ? null : packParam || PACKS[slug] || null;
@@ -163,8 +170,17 @@ const hud = new Hud(app, {
   onRecentre: () => player.placeAt(start.lng, start.lat, start.heading),
   onFly: () => { if (caps().fly) player.toggleMode(); },
   onEdit: () => editor.toggle(),
-  onRole: () => void signIn()
+  onRole: () => void signIn(),
+  // the character panel: the choices stick, in this browser, for next time
+  onAvatar: async (url) => { const kind = await api.setAvatar(url); remember.set('avatar', url && kind !== 'capsule' ? url : null); return kind; },
+  onLook: s => { player.lookScale = s; remember.set('look', String(s)); },
+  onCamDist: d => { player.camDist = d; remember.set('camdist', String(d)); },
+  look: lookScale0,
+  camDist: camDist0,
+  avatarUrl
 });
+player.lookScale = lookScale0;
+player.camDist = camDist0;
 
 const editor = new Editor({
   dom: renderer.domElement, camera, frame, field, player, vegetation, today, structures, build, grid, scene, atlas,

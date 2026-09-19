@@ -70,6 +70,8 @@ export class Player {
    * the right button, and a click does not grab the pointer.
    */
   editing = false;
+  /** how far the mouse or a finger turns the view — the character panel's sensitivity slider */
+  lookScale = 1;
   /** buildings that stop you; set by main once the registry has loaded */
   solids: Solid[] = [];
   /** floors and decks you stand on: a ring and its top, taken when it is no more than a step up */
@@ -192,7 +194,7 @@ export class Player {
     window.addEventListener('mouseup', () => { this.dragging = false; });
     window.addEventListener('mousemove', e => {
       if (!this.locked && !this.dragging) return;
-      this.look(e.movementX * LOOK, e.movementY * LOOK);
+      this.look(e.movementX * LOOK * this.lookScale, e.movementY * LOOK * this.lookScale);
     });
     // touch: one finger anywhere but the thumbstick looks around
     this.dom.addEventListener('touchstart', e => {
@@ -200,7 +202,7 @@ export class Player {
     }, { passive: true });
     this.dom.addEventListener('touchmove', e => {
       const t = e.touches[0]; if (!t || !this.lastTouch) return;
-      this.look((t.clientX - this.lastTouch.x) * TOUCH_LOOK, (t.clientY - this.lastTouch.y) * TOUCH_LOOK);
+      this.look((t.clientX - this.lastTouch.x) * TOUCH_LOOK * this.lookScale, (t.clientY - this.lastTouch.y) * TOUCH_LOOK * this.lookScale);
       this.lastTouch = { x: t.clientX, y: t.clientY };
     }, { passive: true });
     this.dom.addEventListener('touchend', () => { this.lastTouch = null; }, { passive: true });
