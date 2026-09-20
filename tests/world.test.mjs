@@ -1148,10 +1148,58 @@ const entered = await page.evaluate(async ({ pos, outline, fixture }) => {
   p.key('w', true); for (let i = 0; i < 6; i++) p.update(1); p.key('w', false);
   const st = p.state();
   const intoWall = { northM: (st.lat - pos[1]) * 110540, touching: st.touching };
+  //   A model may put stonework OUTSIDE the ground its outline clears — the Oak Leaf's fire ring,
+  //   its seating and its standing stone all stand in an oak lounge left uncleared on purpose, so
+  //   the recorded oaks there survive. The planting rule consulted outlines only, which left those
+  //   pieces unprotected and would eventually grow a tree through a boulder.
+  //
+  //   HOW STRONG THIS CHECK ACTUALLY IS, stated rather than implied. `through === 0` is the real
+  //   assertion and `exposed > 0` keeps it honest — it fails if no stonework falls outside a
+  //   footprint at all, which would mean the fixture had drifted away from the shape of the bug.
+  //
+  //   But `nearestPlantM` is reported because it is the check's weak point: the fire ring sits in
+  //   ground that is bare anyway, about ten metres from the closest plant, so an empty ring is
+  //   partly the fixture's doing and not only the exclusion's. Making this airtight means putting
+  //   the ring in dense planting, which this fixture's layout does not cheaply allow. Until then,
+  //   read the number: if it ever drops near zero the check has become strong, and if it grows
+  //   the check has become weaker. It is not a guard to trust alone.
+  await new Promise(r => setTimeout(r, 900));          // the replant is debounced; let it land
+  const hit = (x, z, ring) => {
+    let h = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const a = ring[i], b = ring[j];
+      if ((a.z > z) !== (b.z > z) && x < ((b.x - a.x) * (z - a.z)) / (b.z - a.z) + a.x) h = !h;
+    }
+    return h;
+  };
+  const prints = w.structures.list.filter(x => x.outline && x.outline.length >= 3)
+    .map(x => x.outline.map(([lng, lat]) => w.frame.toWorld(lng, lat)));
+  //   Counted per RING POINT, not per centroid: a wall that straddles the outline's edge has its
+  //   middle inside and its face outside, and it is the face that a tree would grow through.
+  let exposed = 0;
+  for (const s of w.structures.solids) {
+    if (s.ring.some(q => !prints.some(f => hit(q.x, q.z, f)))) exposed++;
+  }
+  const fire = w.structures.solids.find(sd => sd.id.endsWith(':fire ring'));
+  const fx = fire ? fire.ring.reduce((t, q) => t + q.x, 0) / fire.ring.length : 0;
+  const fz = fire ? fire.ring.reduce((t, q) => t + q.z, 0) / fire.ring.length : 0;
+  let through = 0, plants = 0, nearest = Infinity;
+  for (const m of w.vegetation.group.children) {
+    const e = m.instanceMatrix.array;
+    for (let i = 0; i < m.count; i++) {
+      plants++;
+      const x = e[i * 16 + 12], z = e[i * 16 + 14];
+      if (w.structures.solids.some(sd => hit(x, z, sd.ring))) through++;
+      if (fire) { const dd = Math.hypot(x - fx, z - fz); if (dd < nearest) nearest = dd; }
+    }
+  }
+  const walls = { solids: w.structures.solids.length, exposed, through, plants,
+                  nearestPlantM: Math.round(nearest * 10) / 10 };
+
   // take the proposal away again: the house is back, the tree is back
   w.rebuild([], []);
   const restored = { house: !!w.today.group.getObjectByName('today:house'), platforms: p.platforms.map(f => f.id), solids: p.solids.map(s => s.id).sort() };
-  return { before, loaded, after, onSlab, intoWall, restored, fixture };
+  return { before, loaded, after, onSlab, intoWall, walls, restored, fixture };
 }, { pos: at(70, 0), outline: [at(66, -3), at(74, -3), at(74, 3), at(66, 3), at(66, -3)], fixture: FIXTURE_MODEL });
 check('model: a proposal with a .glb is placed by the registry and brings its own floor and wall',
   entered.loaded && entered.after.platforms.includes('fixture-house:slab') && entered.after.solids.includes('fixture-house:wall') && !entered.after.solids.includes('fixture-house'),
@@ -1167,6 +1215,9 @@ check('model: the walker stands on the slab, a step above the ground, and the wa
 check('model: taken away again, the house stands and nothing of the model is left to walk on or into',
   entered.restored.house && entered.restored.platforms.length === entered.before.platforms && !entered.restored.platforms.some(f => f.startsWith('fixture-house')) && entered.restored.solids.includes('house') && !entered.restored.solids.some(s => s.startsWith('fixture-house')),
   { house: entered.restored.house, platforms: entered.restored.platforms, before: entered.before.platforms });
+
+check('vegetation: nothing grows through a wall a MODEL brought, including one standing outside the ground its outline clears',
+  entered.walls.exposed > 0 && entered.walls.through === 0, entered.walls);
 
 // ---- when the fine ground does not answer ------------------------------------------------------------
 // The atlas is down, or unreachable from where the person is: the world must still open. It falls

@@ -152,10 +152,34 @@ const structures = new Structures(frame, field, atlas);
 const today = new Today(frame, field);
 const build = new Build(frame, field);
 
-/** everything a body can stand on or walk into, gathered from the registry, the record, and what is built */
+/**
+ * Everything a body can stand on or walk into, gathered from the registry, the record, and what
+ * is built — and, when a model brings new ones, the hillside replanted around them.
+ *
+ *   A model's floors and walls arrive over the network, long after the ground was first planted,
+ *   so the keep-out set the planting used did not know they existed. Without the replant below, a
+ *   model's own stonework is protected only from the moment of the NEXT replant, which on a
+ *   session where nobody edits anything never comes.
+ *
+ *   Debounced, because eleven models landing one after another should cost one replant and not
+ *   eleven; and skipped entirely while there is nothing to protect, so an empty boot does not pay
+ *   for a rebuild it does not need.
+ */
+let walkSig = '';
+let replantAfterWalk: ReturnType<typeof setTimeout> | null = null;
 function refreshWalk() {
   player.solids = solidsFrom(structures.list, frame, field, pid).concat(today.solids, build.solids, structures.solids);
   player.platforms = build.platforms.concat(structures.platforms);
+
+  const sig = `${structures.platforms.length}:${structures.solids.length}`;
+  if (sig === walkSig || sig === '0:0') return;
+  walkSig = sig;
+  if (replantAfterWalk) clearTimeout(replantAfterWalk);
+  replantAfterWalk = setTimeout(() => {
+    replantAfterWalk = null;
+    const p = player.position;
+    vegetation.build(p.x, p.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity, exclude: packRing() });
+  }, 250);
 }
 structures.onWalk = refreshWalk;
 
@@ -356,9 +380,22 @@ function keepOut() {
       }),
       pad: 3.5
     }));
-  // nothing grows through a floor or a wall
+  // nothing grows through a floor or a wall the studio built
   for (const f of build.platforms) out.push({ ring: f.ring, pad: 1.5 });
   for (const s of build.solids) out.push({ ring: s.ring, pad: 1 });
+
+  //   ...nor through one a MODEL brought with it. A structure's outline is the ground it clears,
+  //   and a model is allowed to put things outside that ground on purpose: the Oak Leaf's fire
+  //   ring, its seating and its standing stone all stand in the oak lounge, which is deliberately
+  //   left uncleared so the recorded oaks there survive. Consulting only the outline left those
+  //   68 ring points unprotected, and a tree would eventually grow through a boulder.
+  //
+  //   The pads are deliberately smaller than the studio's. This is not clearing ground, it is
+  //   keeping a trunk out of stonework: enough that nothing intersects, not so much that the
+  //   grove those places exist inside gets thinned. Floors get no pad at all — a tree should not
+  //   stand in the middle of a stepping stone, but it is very much meant to stand beside one.
+  for (const f of structures.platforms) out.push({ ring: f.ring, pad: 0 });
+  for (const s of structures.solids) out.push({ ring: s.ring, pad: 0.75 });
   const p = frame.toWorld(start.lng, start.lat);
   const r = 7;
   out.push({

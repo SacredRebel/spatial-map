@@ -284,6 +284,9 @@ export function materialsJson(base) {
 // south edge, a roof on four posts, and `extras.walk` saying the slab is a floor and the wall is a
 // wall. The world reads that and lets the walker in.
 export const FIXTURE_MODEL = { w: 8, d: 6, slab: 0.4, wall: 3.0, roof: 3.7 };
+/** how far north of the house the free-standing fire ring sits, in metres — see the comment at its box() */
+const FIRE_RING_Z = 10;
+
 export function fixtureModelGlb() {
   const { w, d, slab, wall, roof } = FIXTURE_MODEL;
   const pos = []; const idx = [];
@@ -299,6 +302,13 @@ export function fixtureModelGlb() {
   box(-w / 2, slab, d / 2 - 0.2, w / 2, slab + wall, d / 2);                  // the south wall (z = +d/2 is south)
   box(-w / 2, roof - 0.3, -d / 2, w / 2, roof, d / 2);                        // the roof
   for (const [x, z] of [[-w / 2 + 0.2, -d / 2 + 0.2], [w / 2 - 0.2, -d / 2 + 0.2]]) box(x - 0.1, slab, z - 0.1, x + 0.1, roof - 0.3, z + 0.1);
+  //   A fire ring, standing on its own ten metres north of the house and DELIBERATELY outside the
+  //   ground the registry outline clears. The Oak Leaf does exactly this — its fire ring, seating
+  //   and standing stone sit in an oak lounge left uncleared so the recorded oaks there survive —
+  //   and the engine used to leave them unprotected, because planting consulted outlines only.
+  //   It has to be well clear of the outline's own 3.5 m pad, or the pad protects it by accident
+  //   and the test that guards this proves nothing.
+  box(-0.6, 0, -FIRE_RING_Z - 0.6, 0.6, 0.45, -FIRE_RING_Z + 0.6);
   const P = new Float32Array(pos); const I = new Uint32Array(idx);
   const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
   for (let i = 0; i < P.length; i += 3) for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], P[i + k]); max[k] = Math.max(max[k], P[i + k]); }
@@ -307,7 +317,10 @@ export function fixtureModelGlb() {
   const bin = Buffer.concat([pb, Buffer.alloc(pad(pb.length)), ib, Buffer.alloc(pad(ib.length))]);
   const walk = {
     floors: [{ name: 'slab', ring: [[-w / 2, -d / 2], [w / 2, -d / 2], [w / 2, d / 2], [-w / 2, d / 2]], top: slab }],
-    solids: [{ name: 'wall', ring: [[-w / 2, d / 2 - 0.2], [w / 2, d / 2 - 0.2], [w / 2, d / 2], [-w / 2, d / 2]], base: slab, top: slab + wall }]
+    solids: [
+      { name: 'wall', ring: [[-w / 2, d / 2 - 0.2], [w / 2, d / 2 - 0.2], [w / 2, d / 2], [-w / 2, d / 2]], base: slab, top: slab + wall },
+      { name: 'fire ring', ring: [[-0.6, -FIRE_RING_Z - 0.6], [0.6, -FIRE_RING_Z - 0.6], [0.6, -FIRE_RING_Z + 0.6], [-0.6, -FIRE_RING_Z + 0.6]], base: 0, top: 0.45 }
+    ]
   };
   const doc = {
     asset: { version: '2.0', generator: 'spatial-map fixture' },
