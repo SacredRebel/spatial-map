@@ -76,7 +76,25 @@ const qs = new URLSearchParams(location.search);
 const atlas = (qs.get('atlas') || DEFAULT_ATLAS).replace(/\/$/, '');
 const slug = qs.get('community') || 'sulphur-mountain';
 const community = COMMUNITIES[slug] || COMMUNITIES['sulphur-mountain'];
-const at = (qs.get('at') || '').split(',').map(Number);
+/**
+ * Where to come in.
+ *
+ *   `at` takes either COORDINATES — `at=<lng>,<lat>[,<heading>]`, exact and unambiguous — or the
+ *   NAME of something in the registry: `at=sulphur-oak-house`.
+ *
+ *   The name is the one that survives. A link built on coordinates quietly points at the field
+ *   beside a building the day someone moves it three metres; a link built on an id keeps meaning
+ *   "the Oak Leaf" for as long as the Oak Leaf exists. Anything sending people here — a portal, a
+ *   dashboard, a message — should use the name, and coordinates should be kept for pointing at a
+ *   spot that is not a thing.
+ *
+ *   A name cannot be resolved at this moment: the registry has not arrived. So the world opens at
+ *   the community's own spawn and steps across once the registry lands.
+ */
+const atRaw = (qs.get('at') || '').trim();
+const atNums = atRaw.split(',').map(Number);
+const atNamed = atRaw && !isFinite(atNums[0]) ? atRaw : null;
+const at = atNums;
 const start = {
   lng: isFinite(at[0]) && at[0] !== 0 ? at[0] : community.lng,
   lat: isFinite(at[1]) && at[1] !== 0 ? at[1] : community.lat,
@@ -369,6 +387,53 @@ function packRing(): { x: number; z: number }[] {
   });
 }
 
+/** how far back from a named structure to stand, in metres — far enough to see it whole */
+const APPROACH_M = 14;
+
+/**
+ * Stand outside a named structure, looking at it.
+ *
+ *   The approach direction is neither a guess nor a constant: it is the bearing from the structure
+ *   towards the community's own spawn, so you arrive the way someone walking from the rest of the
+ *   settlement would. A fixed "stand to the south" would put you in a creek at one building and
+ *   inside a hillside at another, and a link that drops people at the back of a building teaches
+ *   them the building has no front.
+ *
+ *   Returns false and says so when the name is unknown — a dead link should be legible, not a
+ *   silent arrival at the default spawn wondering why the view looks wrong.
+ */
+function standAt(id: string): boolean {
+  const s = structures.list.find(x => x.id === id);
+  //   A row with a model has a position. A RESERVED SITE has only an outline — ground set aside
+  //   with nothing standing on it yet — and those are worth linking to precisely because there is
+  //   nothing there to see: "this is where the barn goes" is a thing to send someone. So fall back
+  //   to the outline's centroid rather than refusing.
+  const where = s?.position
+    ?? (s?.outline && s.outline.length >= 3
+      ? [s.outline.reduce((t, q) => t + q[0], 0) / s.outline.length,
+         s.outline.reduce((t, q) => t + q[1], 0) / s.outline.length] as [number, number]
+      : null);
+  if (!where) {
+    hud.setNotice(`this link points at "${id}", and nothing here is called that. Showing the usual way in.`);
+    return false;
+  }
+  const a = frame.toWorld(where[0], where[1]);
+  const b = frame.toWorld(community.lng, community.lat);
+  const dx = b.x - a.x, dz = b.z - a.z;
+  const len = Math.hypot(dx, dz);
+  // standing on the thing itself: nothing to face, so keep the community's own heading
+  const stand = len < 1 ? a : { x: a.x + (dx / len) * APPROACH_M, z: a.z + (dz / len) * APPROACH_M };
+  const ll = frame.toLngLat(stand.x, stand.z);
+  const heading = len < 1 ? community.heading : ((Math.atan2(a.x - stand.x, -(a.z - stand.z)) * 180) / Math.PI + 360) % 360;
+
+  player.placeAt(ll.lng, ll.lat, heading);
+  const p = player.position;
+  terrain.buildFar(p.x, p.z, FAR);
+  terrain.buildCoarse(p.x, p.z, COARSE);
+  terrain.buildFine(p.x, p.z, FINE);
+  return true;
+}
+
 /** what the plants must leave clear: every footprint the atlas knows about, plus where you stand */
 function keepOut() {
   const out = structures.list
@@ -456,6 +521,7 @@ async function boot() {
   }
   structuresBase = structures.list.slice();
   structures.build(area.pid);
+  if (atNamed) standAt(atNamed);
 
   if (pack) {
     hud.setLoading('reading what stands here…');
@@ -610,6 +676,31 @@ const api = {
   },
   /** where the overlay will look for the builder — the suite guards that it is somewhere real */
   builderUrl: qs.get('builder') || BUILDER_URL,
+  /**
+   * A link back to here, so a place can be sent to someone.
+   *
+   *   Consuming a deep link is only half a contract. Until something can PRODUCE one, every link
+   *   in existence is hand-written, and hand-written links are where the coordinate-versus-name
+   *   mistake gets made. Given a name it writes the durable kind; given nothing it writes where
+   *   the walker stands, to about a centimetre — the right answer for "this exact spot" and the
+   *   wrong one for "this building".
+   */
+  link: (opts: { at?: string; hours?: number } = {}) => {
+    const u = new URL(location.href);
+    u.search = '';
+    const q = u.searchParams;
+    if (slug !== 'sulphur-mountain') q.set('community', slug);
+    if (opts.at) q.set('at', opts.at);
+    else {
+      const st = player.state();
+      q.set('at', `${st.lng.toFixed(7)},${st.lat.toFixed(7)},${Math.round(st.headingDeg)}`);
+    }
+    q.set('t', String(Math.round((opts.hours ?? clockHours) * 100) / 100));
+    if (atlas !== DEFAULT_ATLAS) q.set('atlas', atlas);
+    return u.toString();
+  },
+  /** step to a named structure exactly as `?at=<id>` would, and say whether the name was known */
+  standAt,
   /**
    * Can this world open that model? Meshes, triangles, and whether it carries walk data.
    *

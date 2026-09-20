@@ -1340,6 +1340,42 @@ const guard = await page.evaluate(() => {
 check('looks: frames that cost more than they return step the chain down, and the world keeps drawing',
   guard.downgraded && guard.target !== 'full' && guard.drew, guard);
 
+// ---- deep links ---------------------------------------------------------------------------------
+// A link is how a place travels. Coordinates are exact and they rot: move a building three metres
+// and every link ever sent points at the field beside it. A name does not rot, so the contract has
+// to speak both, and a dead name has to be legible rather than a silent arrival at the default
+// spawn wondering why the view looks wrong.
+const links = await page.evaluate(() => {
+  const w = window.world;
+  const was = w.player.state();
+  const target = w.structures.list.find(x => x.outline && x.outline.length >= 3);
+  const ok = w.standAt(target.id);
+  const there = w.player.state();
+  const c = target.position ?? [target.outline.reduce((t, q) => t + q[0], 0) / target.outline.length,
+                                target.outline.reduce((t, q) => t + q[1], 0) / target.outline.length];
+  const a = w.frame.toWorld(c[0], c[1]);
+  const b = w.frame.toWorld(there.lng, there.lat);
+  const away = Math.hypot(a.x - b.x, a.z - b.z);
+  // heading is degrees clockwise from north; does it point back at the building?
+  const want = ((Math.atan2(a.x - b.x, -(a.z - b.z)) * 180) / Math.PI + 360) % 360;
+  const off = Math.abs(((there.headingDeg - want + 540) % 360) - 180);   // 0 = looking straight at it
+
+  const bad = w.standAt('no-such-place');
+  const named = w.link({ at: target.id });
+  const here = w.link();
+  w.player.placeAt(was.lng, was.lat, was.headingDeg);
+  return {
+    id: target.id, ok, away: Math.round(away * 10) / 10, facingOffDeg: Math.round(off), bad,
+    namedHasId: named.includes(`at=${target.id}`), namedHasTime: /[?&]t=/.test(named),
+    hereHasCoords: /[?&]at=-?\d+\.\d+%2C-?\d+\.\d+/.test(here) || /[?&]at=-?\d+\.\d+,-?\d+\.\d+/.test(here)
+  };
+});
+check('links: `at=<id>` stands you a short walk from that structure, looking at it',
+  links.ok === true && links.away > 10 && links.away < 20 && links.facingOffDeg < 2, links);
+check('links: a name nothing answers to is refused rather than silently ignored', links.bad === false, links);
+check('links: the world writes its own links — a name when given one, this exact spot when not',
+  links.namedHasId && links.namedHasTime && links.hereHasCoords, links);
+
 // ---- compressed models -------------------------------------------------------------------------
 // Every model that meets the 500 kB budget is a compressed model, and `EXT_meshopt_compression`
 // lands in the glTF's `extensionsRequired` — a loader without the decoder throws outright rather
