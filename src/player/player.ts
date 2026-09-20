@@ -126,6 +126,28 @@ export class Player {
     this.sync();
   }
 
+  /**
+   * Put the eye exactly somewhere, flying.
+   *
+   *   `placeAt` drops a body onto the ground, which is what walking wants and what a camera never
+   *   does. A tour needs the other thing: an exact height, an exact heading and an exact pitch,
+   *   with no gravity waiting to take it back. Switches to fly on the way in, because an eye
+   *   fourteen metres up in walk mode is a body about to fall.
+   *
+   *   `altitudeM` is height ABOVE THE GROUND under that point, not above sea level — a tour
+   *   written in absolute metres would skim the valley and plough into the ridge.
+   */
+  placeEye(lng: number, lat: number, altitudeM: number, headingDeg: number, pitchDeg: number) {
+    this.setMode('fly');
+    const w = this.frame.toWorld(lng, lat);
+    this.ground = this.field.atOr(lng, lat, this.ground);
+    this.pos.set(w.x, this.ground + altitudeM, w.z);
+    this.yaw = -headingDeg * Math.PI / 180;
+    this.pitch = THREE.MathUtils.clamp(pitchDeg * Math.PI / 180, -FLY_PITCH, FLY_PITCH);
+    this.vel.set(0, 0, 0);
+    this.sync();
+  }
+
   get position(): THREE.Vector3 { return this.pos; }
   get headingDeg(): number { return ((-this.yaw * 180 / Math.PI) % 360 + 360) % 360; }
   /** total ground covered, in metres — the gait is paced by this, not by the clock */

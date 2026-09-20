@@ -1151,18 +1151,8 @@ const entered = await page.evaluate(async ({ pos, outline, fixture }) => {
   //   A model may put stonework OUTSIDE the ground its outline clears — the Oak Leaf's fire ring,
   //   its seating and its standing stone all stand in an oak lounge left uncleared on purpose, so
   //   the recorded oaks there survive. The planting rule consulted outlines only, which left those
-  //   pieces unprotected and would eventually grow a tree through a boulder.
-  //
-  //   HOW STRONG THIS CHECK ACTUALLY IS, stated rather than implied. `through === 0` is the real
-  //   assertion and `exposed > 0` keeps it honest — it fails if no stonework falls outside a
-  //   footprint at all, which would mean the fixture had drifted away from the shape of the bug.
-  //
-  //   But `nearestPlantM` is reported because it is the check's weak point: the fire ring sits in
-  //   ground that is bare anyway, about ten metres from the closest plant, so an empty ring is
-  //   partly the fixture's doing and not only the exclusion's. Making this airtight means putting
-  //   the ring in dense planting, which this fixture's layout does not cheaply allow. Until then,
-  //   read the number: if it ever drops near zero the check has become strong, and if it grows
-  //   the check has become weaker. It is not a guard to trust alone.
+  //   pieces unprotected and would eventually grow a tree through a boulder. This fixture has the
+  //   same shape: its wall sits about 3.3 m south of centre against an outline that stops at 3 m.
   await new Promise(r => setTimeout(r, 900));          // the replant is debounced; let it land
   const hit = (x, z, ring) => {
     let h = false;
@@ -1180,21 +1170,30 @@ const entered = await page.evaluate(async ({ pos, outline, fixture }) => {
   for (const s of w.structures.solids) {
     if (s.ring.some(q => !prints.some(f => hit(q.x, q.z, f)))) exposed++;
   }
+  //   HOW STRONG THIS CHECK ACTUALLY IS, stated rather than implied. `through === 0` is the real
+  //   assertion and `exposed > 0` keeps it honest — it fails if no stonework falls outside a
+  //   footprint at all, which would mean the fixture had drifted away from the shape of the bug.
+  //
+  //   But `nearestPlantM` is reported because it is the check's weak point: the fire ring sits in
+  //   ground that is bare anyway, about ten metres from the closest plant, so an empty ring is
+  //   partly the fixture's doing and not only the exclusion's. Making this airtight means putting
+  //   the ring in dense planting, which this fixture's layout does not cheaply allow. Until then,
+  //   read the number: if it ever drops near zero the check has become strong, and if it grows
+  //   the check has become weaker. It is not a guard to trust alone.
   const fire = w.structures.solids.find(sd => sd.id.endsWith(':fire ring'));
   const fx = fire ? fire.ring.reduce((t, q) => t + q.x, 0) / fire.ring.length : 0;
   const fz = fire ? fire.ring.reduce((t, q) => t + q.z, 0) / fire.ring.length : 0;
-  let through = 0, plants = 0, nearest = Infinity;
+  let through = 0, plants = 0, near = 0, nearest = Infinity;
   for (const m of w.vegetation.group.children) {
     const e = m.instanceMatrix.array;
     for (let i = 0; i < m.count; i++) {
       plants++;
       const x = e[i * 16 + 12], z = e[i * 16 + 14];
       if (w.structures.solids.some(sd => hit(x, z, sd.ring))) through++;
-      if (fire) { const dd = Math.hypot(x - fx, z - fz); if (dd < nearest) nearest = dd; }
+      if (fire) { const dd = Math.hypot(x - fx, z - fz); if (dd < 8) near++; if (dd < nearest) nearest = dd; }
     }
   }
-  const walls = { solids: w.structures.solids.length, exposed, through, plants,
-                  nearestPlantM: Math.round(nearest * 10) / 10 };
+  const walls = { solids: w.structures.solids.length, exposed, through, plants, nearFireRing: near, nearestPlantM: Math.round(nearest * 10) / 10, fireAt: [Math.round(fx), Math.round(fz)] };
 
   // take the proposal away again: the house is back, the tree is back
   w.rebuild([], []);
@@ -1365,7 +1364,8 @@ const links = await page.evaluate(() => {
   const here = w.link();
   w.player.placeAt(was.lng, was.lat, was.headingDeg);
   return {
-    id: target.id, ok, away: Math.round(away * 10) / 10, facingOffDeg: Math.round(off), bad,
+    id: target.id, ok, away: Math.round(away * 10) / 10, facingOffDeg: Math.round(off),
+    bad,
     namedHasId: named.includes(`at=${target.id}`), namedHasTime: /[?&]t=/.test(named),
     hereHasCoords: /[?&]at=-?\d+\.\d+%2C-?\d+\.\d+/.test(here) || /[?&]at=-?\d+\.\d+,-?\d+\.\d+/.test(here)
   };
@@ -1375,6 +1375,57 @@ check('links: `at=<id>` stands you a short walk from that structure, looking at 
 check('links: a name nothing answers to is refused rather than silently ignored', links.bad === false, links);
 check('links: the world writes its own links — a name when given one, this exact spot when not',
   links.namedHasId && links.namedHasTime && links.hereHasCoords, links);
+
+// ---- the flight over the place ------------------------------------------------------------------
+// The route is built from the registry, not written down, and ordered by the registry's own phase.
+// That is the whole point: a hardcoded route is wrong by the end of the month and confidently so,
+// whereas this one keeps telling the true story after the phasing changes because nobody has to
+// remember to re-cut it.
+//
+// Stepped by hand rather than watched over real frames: in a headless browser a throttled tab and
+// a broken tour look exactly alike, and a check that cannot tell them apart is not a check.
+const flyover = await page.evaluate(() => {
+  const w = window.world;
+  const route = w.tour.route();
+  const phases = route.slice(1, -1).map(stop => {
+    const s = w.structures.list.find(x => (x.name || x.id) === stop.name);
+    return s ? (s.phase ?? 99) : null;
+  });
+  const sorted = phases.every((p, i) => i === 0 || p === null || phases[i - 1] === null || phases[i - 1] <= p);
+
+  const was = w.player.state();
+  const started = w.tour.start();
+  const dur = Math.round(w.tour.durationS);
+
+  const seen = [];
+  let underground = 0, steps = 0;
+  for (let i = 0; i < 800 && w.tour.running; i++) {   // 40 s of steps; the route is ~23 s
+    const eye = w.tour.step(0.05);
+    if (!eye) break;
+    steps++;
+    seen.push([eye.lng, eye.lat]);
+    if (eye.altitudeM < 0.5) underground++;          // altitude is above the ground beneath
+  }
+  const movedM = seen.length < 2 ? 0 : Math.round(Math.max(...seen.map(([a, b]) =>
+    Math.hypot((a - seen[0][0]) * 91818, (b - seen[0][1]) * 110540))));
+  const ranOut = w.tour.running;                      // it should have finished inside 20 s of steps
+
+  // a person reaching for a control takes it back, with no confirmation
+  w.tour.start();
+  dispatchEvent(new KeyboardEvent('keydown', { key: 'w' }));
+  const stopped = !w.tour.running;
+
+  w.tour.stop();
+  w.player.setMode('walk');
+  w.player.placeAt(was.lng, was.lat, was.headingDeg);
+  return { stops: route.length, phases, sorted, started, dur, steps, movedM, underground, stopped, ranOut };
+});
+check('tour: the route is built from the registry and ordered by its own phasing',
+  flyover.started === true && flyover.stops >= 4 && flyover.sorted, flyover);
+check('tour: it flies — the eye travels, keeps its height over the ground, and ends',
+  flyover.movedM > 20 && flyover.underground === 0 && flyover.ranOut === false, flyover);
+check('tour: a hand on any control takes it back immediately, with nothing to confirm',
+  flyover.stopped === true, flyover);
 
 // ---- compressed models -------------------------------------------------------------------------
 // Every model that meets the 500 kB budget is a compressed model, and `EXT_meshopt_compression`

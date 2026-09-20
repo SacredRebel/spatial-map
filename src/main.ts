@@ -45,7 +45,9 @@ import { loadAvatar } from './player/avatar';
 import { Hud } from './ui/hud';
 import { Stick, touchCapable } from './ui/stick';
 import { Studio, BUILDER_URL } from './ui/studio';
+import { Tour, routeFrom } from './world/tour';
 import { makeGltfLoader } from './world/gltf';
+import { placeOf } from './world/structures';
 import { buildSite, refGlbOf, type EcoSite } from './world/site';
 import { Looks, type Quality } from './world/looks';
 import './style.css';
@@ -82,14 +84,14 @@ const community = COMMUNITIES[slug] || COMMUNITIES['sulphur-mountain'];
  *   `at` takes either COORDINATES — `at=<lng>,<lat>[,<heading>]`, exact and unambiguous — or the
  *   NAME of something in the registry: `at=sulphur-oak-house`.
  *
- *   The name is the one that survives. A link built on coordinates quietly points at the field
- *   beside a building the day someone moves it three metres; a link built on an id keeps meaning
- *   "the Oak Leaf" for as long as the Oak Leaf exists. Anything sending people here — a portal, a
- *   dashboard, a message — should use the name, and coordinates should be kept for pointing at a
- *   spot that is not a thing.
+ *   The name is the one that survives. A link built on coordinates is a link that quietly points
+ *   at a field the day someone moves the building three metres; a link built on an id keeps
+ *   meaning "the Oak Leaf" for as long as the Oak Leaf exists. Anything sending people here — a
+ *   community's portal, a dashboard, a message — should use the name, and coordinates should be
+ *   reserved for pointing at a spot that is not a thing.
  *
- *   A name cannot be resolved at this moment: the registry has not arrived. So the world opens at
- *   the community's own spawn and steps across once the registry lands.
+ *   A name cannot be resolved at this moment: the registry has not arrived yet. So the world
+ *   opens at the community's own spawn and steps across once the registry lands.
  */
 const atRaw = (qs.get('at') || '').trim();
 const atNums = atRaw.split(',').map(Number);
@@ -387,20 +389,30 @@ function packRing(): { x: number; z: number }[] {
   });
 }
 
+/**
+ * The flight over the place.
+ *
+ *   Off unless `?tour=1` asks for it, and stopped the instant anyone touches a control — a tour
+ *   that fights the mouse is worse than no tour, and someone who has started steering has stopped
+ *   watching.
+ */
+const tour = new Tour(frame, field);
+const tourWanted = qs.get('tour') === '1';
+
 /** how far back from a named structure to stand, in metres — far enough to see it whole */
 const APPROACH_M = 14;
 
 /**
  * Stand outside a named structure, looking at it.
  *
- *   The approach direction is neither a guess nor a constant: it is the bearing from the structure
- *   towards the community's own spawn, so you arrive the way someone walking from the rest of the
- *   settlement would. A fixed "stand to the south" would put you in a creek at one building and
- *   inside a hillside at another, and a link that drops people at the back of a building teaches
- *   them the building has no front.
+ *   The approach direction is not a guess and not a constant: it is the bearing from the structure
+ *   towards the community's own spawn point, so you always arrive the way someone walking from the
+ *   rest of the settlement would arrive. A fixed "stand to the south" would put you in a creek at
+ *   one building and inside a hillside at another, and a link that drops people at the back of a
+ *   building teaches them the building has no front.
  *
- *   Returns false and says so when the name is unknown — a dead link should be legible, not a
- *   silent arrival at the default spawn wondering why the view looks wrong.
+ *   Returns false and says so when the name is not in the registry — a dead link should be
+ *   legible, not a silent arrival at the default spawn wondering why it looks wrong.
  */
 function standAt(id: string): boolean {
   const s = structures.list.find(x => x.id === id);
@@ -408,11 +420,7 @@ function standAt(id: string): boolean {
   //   with nothing standing on it yet — and those are worth linking to precisely because there is
   //   nothing there to see: "this is where the barn goes" is a thing to send someone. So fall back
   //   to the outline's centroid rather than refusing.
-  const where = s?.position
-    ?? (s?.outline && s.outline.length >= 3
-      ? [s.outline.reduce((t, q) => t + q[0], 0) / s.outline.length,
-         s.outline.reduce((t, q) => t + q[1], 0) / s.outline.length] as [number, number]
-      : null);
+  const where = s ? placeOf(s) : null;
   if (!where) {
     hud.setNotice(`this link points at "${id}", and nothing here is called that. Showing the usual way in.`);
     return false;
@@ -424,6 +432,7 @@ function standAt(id: string): boolean {
   // standing on the thing itself: nothing to face, so keep the community's own heading
   const stand = len < 1 ? a : { x: a.x + (dx / len) * APPROACH_M, z: a.z + (dz / len) * APPROACH_M };
   const ll = frame.toLngLat(stand.x, stand.z);
+  // heading is degrees clockwise from north; we want to look back down the approach at the building
   const heading = len < 1 ? community.heading : ((Math.atan2(a.x - stand.x, -(a.z - stand.z)) * 180) / Math.PI + 360) % 360;
 
   player.placeAt(ll.lng, ll.lat, heading);
@@ -431,6 +440,33 @@ function standAt(id: string): boolean {
   terrain.buildFar(p.x, p.z, FAR);
   terrain.buildCoarse(p.x, p.z, COARSE);
   terrain.buildFine(p.x, p.z, FINE);
+  return true;
+}
+
+/**
+ * Begin the flight, and hand control straight back the moment anyone reaches for it.
+ *
+ *   Every way in — a key, the mouse, a thumb on the stick — cancels. There is no "are you sure":
+ *   somebody who has started steering has already decided they would rather look for themselves,
+ *   and asking them to confirm that is asking them to fight the thing twice.
+ */
+function startTour(): boolean {
+  const route = routeFrom(structures.list, { frame, field, home: { lng: community.lng, lat: community.lat } });
+  if (route.length < 2) {
+    hud.setNotice('there is nothing standing here yet to fly over');
+    return false;
+  }
+  tour.onStop = (name, i, n) => hud.setNotice(`${name}   ·   ${i} of ${n}`);
+  tour.start(route);
+  hud.setNotice(`${route.length - 1} stops   ·   about ${Math.round(tour.durationS)} seconds   ·   move to take over`);
+  const off = () => {
+    if (!tour.running) return;
+    tour.stop();
+    hud.setNotice(null);
+  };
+  for (const ev of ['keydown', 'pointerdown', 'wheel', 'touchstart']) {
+    addEventListener(ev, off, { passive: true });
+  }
   return true;
 }
 
@@ -522,6 +558,7 @@ async function boot() {
   structuresBase = structures.list.slice();
   structures.build(area.pid);
   if (atNamed) standAt(atNamed);
+  if (tourWanted) startTour();
 
   if (pack) {
     hud.setLoading('reading what stands here…');
@@ -569,6 +606,12 @@ function loop() {
   const dt = (now - last) / 1000;
   last = now;
   if (ready) {
+    //   The tour writes the eye BEFORE the player updates, so a leg that lands the camera somewhere
+    //   is not immediately undone by a frame of flight physics. Anything else this frame — the
+    //   terrain rings, the light, the HUD — then follows the tour's position exactly as it follows
+    //   a person's, because as far as the rest of the world is concerned there is no difference.
+    const eye = tour.update(dt);
+    if (eye) player.placeEye(eye.lng, eye.lat, eye.altitudeM, eye.headingDeg, eye.pitchDeg);
     player.update(dt);
     editor.frame();
     const p = player.position;
@@ -682,8 +725,8 @@ const api = {
    *   Consuming a deep link is only half a contract. Until something can PRODUCE one, every link
    *   in existence is hand-written, and hand-written links are where the coordinate-versus-name
    *   mistake gets made. Given a name it writes the durable kind; given nothing it writes where
-   *   the walker stands, to about a centimetre — the right answer for "this exact spot" and the
-   *   wrong one for "this building".
+   *   the walker is standing, to about a centimetre, which is the right answer for "this exact
+   *   spot" and the wrong one for "this building".
    */
   link: (opts: { at?: string; hours?: number } = {}) => {
     const u = new URL(location.href);
@@ -695,12 +738,33 @@ const api = {
       const st = player.state();
       q.set('at', `${st.lng.toFixed(7)},${st.lat.toFixed(7)},${Math.round(st.headingDeg)}`);
     }
-    q.set('t', String(Math.round((opts.hours ?? clockHours) * 100) / 100));
+    const t = opts.hours ?? clockHours;
+    q.set('t', String(Math.round(t * 100) / 100));
     if (atlas !== DEFAULT_ATLAS) q.set('atlas', atlas);
     return u.toString();
   },
   /** step to a named structure exactly as `?at=<id>` would, and say whether the name was known */
   standAt,
+  /** the flight over the place: start it, stop it, or look at the route it would take */
+  tour: {
+    start: startTour,
+    stop: () => tour.stop(),
+    route: () => routeFrom(structures.list, { frame, field, home: { lng: community.lng, lat: community.lat } }),
+    get running() { return tour.running; },
+    get durationS() { return tour.durationS; },
+    /**
+     * Advance the flight by hand and report where the eye went.
+     *
+     *   The loop does exactly this once a frame. Exposing it means the route and the motion can be
+     *   checked without depending on frame timing — which in a headless browser is not a thing to
+     *   depend on, and which would make a real failure and a throttled tab look identical.
+     */
+    step: (dt: number) => {
+      const eye = tour.update(dt);
+      if (eye) player.placeEye(eye.lng, eye.lat, eye.altitudeM, eye.headingDeg, eye.pitchDeg);
+      return eye;
+    }
+  },
   /**
    * Can this world open that model? Meshes, triangles, and whether it carries walk data.
    *

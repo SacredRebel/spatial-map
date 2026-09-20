@@ -38,6 +38,41 @@ export interface Structure {
   enter?: boolean;
   /** what stands here today and comes down for this: kinds from the today layer (`house`, `shed`…) */
   clears?: string[];
+
+  //   What it costs and when it happens, carried onto the row from the project zones the owner
+  //   wrote. Optional throughout: a community that has not costed anything is a community whose
+  //   map should say nothing about money rather than say zero.
+  /** the project zone this structure belongs to, which is where the money comes from */
+  zone?: string;
+  /** the phase it starts in */
+  phase?: number | null;
+  /** the phases it spans, inclusive — `[1, 3]` runs from the first to the third */
+  phaseSpan?: [number, number] | null;
+  /** parsed for sorting and summing only; null when the source could not honestly become a range */
+  costUSD?: { low: number; high: number } | null;
+  /** how much that figure is worth: a quote, a takeoff, an estimate, or a stand-in */
+  costBasis?: 'takeoff' | 'quoted' | 'estimate' | 'placeholder';
+  /** the budget exactly as it was written — THIS is what a reader should be shown */
+  costSource?: string | null;
+  /** the timeline exactly as it was written */
+  timeline?: string | null;
+}
+
+/**
+ * Where a structure IS, whether or not anything stands there yet.
+ *
+ *   A row with a model carries a position. A reserved SITE carries only an outline — ground set
+ *   aside with nothing on it — and it still has a place on the earth. Both a deep link and the
+ *   tour need the same answer, so they ask the same function rather than each inventing a rule
+ *   and drifting apart.
+ */
+export function placeOf(s: Structure): [number, number] | null {
+  if (s.position) return s.position;
+  if (s.outline && s.outline.length >= 3) {
+    return [s.outline.reduce((t, q) => t + q[0], 0) / s.outline.length,
+            s.outline.reduce((t, q) => t + q[1], 0) / s.outline.length];
+  }
+  return null;
 }
 
 /** what a model's extras.walk holds: plan rings in model metres, heights in model metres */
