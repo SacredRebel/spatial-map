@@ -45,6 +45,7 @@ import { loadAvatar } from './player/avatar';
 import { Hud } from './ui/hud';
 import { Stick, touchCapable } from './ui/stick';
 import { Studio, BUILDER_URL } from './ui/studio';
+import { makeGltfLoader } from './world/gltf';
 import { buildSite, refGlbOf, type EcoSite } from './world/site';
 import { Looks, type Quality } from './world/looks';
 import './style.css';
@@ -571,7 +572,31 @@ const api = {
     return rig.kind;
   },
   /** where the overlay will look for the builder — the suite guards that it is somewhere real */
-  builderUrl: qs.get('builder') || BUILDER_URL
+  builderUrl: qs.get('builder') || BUILDER_URL,
+  /**
+   * Can this world open that model? Meshes, triangles, and whether it carries walk data.
+   *
+   *   A compressed model names its compression in `extensionsRequired`, and a loader without the
+   *   matching decoder throws rather than degrading — so "it does not appear" and "it is not there"
+   *   look identical from the outside. This says which.
+   */
+  probeModel: async (url: string) => {
+    const loader = await makeGltfLoader();
+    const gltf = await loader.loadAsync(url);
+    let meshes = 0, tris = 0;
+    gltf.scene.traverse(o => {
+      const m = o as THREE.Mesh;
+      if (!m.isMesh || !m.geometry) return;
+      meshes++;
+      const g = m.geometry;
+      tris += (g.index ? g.index.count : g.attributes.position.count) / 3;
+    });
+    // read it exactly where the world reads it, so a pass here means the world would see it too
+    const walk = (gltf.scene.userData?.walk || gltf.scene.children[0]?.userData?.walk) as
+      { floors?: unknown[]; solids?: unknown[] } | undefined;
+    return { meshes, triangles: Math.round(tris),
+             floors: walk?.floors?.length ?? 0, solids: walk?.solids?.length ?? 0 };
+  }
 };
 (window as unknown as { world: unknown }).world = api;
 

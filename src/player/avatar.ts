@@ -10,6 +10,7 @@
 //   which is a person's, so at the 1.6 m/s walk the legs turn over about once a second.
 
 import * as THREE from 'three';
+import { makeGltfLoader } from '../world/gltf';
 
 export const STRIDE = 1.55;
 
@@ -279,8 +280,7 @@ export class BoneRig implements AvatarRig {
 export async function loadAvatar(url?: string | null): Promise<AvatarRig> {
   if (!url) return new CapsuleRig();
   try {
-    const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
-    const loader = new GLTFLoader();
+    const loader = await makeGltfLoader();
     let vrmPlugin = false;
     try {
       const vrmMod = await import('@pixiv/three-vrm');

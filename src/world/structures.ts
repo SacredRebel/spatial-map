@@ -17,6 +17,7 @@
 //   so the two are never drawn through each other.
 
 import * as THREE from 'three';
+import { makeGltfLoader } from './gltf';
 import type { Frame } from './geo';
 import type { HeightField } from './heightfield';
 import type { Solid } from './collide';
@@ -175,10 +176,10 @@ export class Structures {
   /** a real building. The loader is imported here and nowhere else, so it ships only when used. */
   private async addModel(s: Structure) {
     try {
-      const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
+      const loader = await makeGltfLoader();
       // absolute (another of ours serves it), a blob the studio just handed over, or the atlas's own path
       const url = s.model!.startsWith('http') || s.model!.startsWith('blob:') ? s.model! : `${this.origin}${s.model}`;
-      const gltf = await new GLTFLoader().loadAsync(url);
+      const gltf = await loader.loadAsync(url);
       const root = gltf.scene;
       const [lng, lat] = s.position!;
       const w = this.frame.toWorld(lng, lat);

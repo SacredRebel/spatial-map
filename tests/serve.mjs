@@ -151,6 +151,9 @@ export function start(port = PORT) {
       }
       // the model a proposal can point at, made on the spot like the ground
       if (p === '/models/fixture-house.glb') return send(res, 200, fixtureModelGlb(), TYPES['.glb']);
+      // a real meshopt-compressed model, 7 kB, walk data intact — the world must be able to open
+      // one of these or every model that meets its size budget silently fails to load
+      if (p === '/models/meshopt-box.glb') return send(res, 200, await readFile(join(here, 'fixtures', 'meshopt-box.glb')), TYPES['.glb']);
       const flat = /^\/tile\/([a-z]+)\.png$/.exec(p);
       if (flat) return send(res, 200, tilePngFlat(flat[1]), TYPES['.png']);
       const air = /^\/aerial\/(\d+)\/(\d+)\/(\d+)$/.exec(p);

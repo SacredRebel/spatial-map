@@ -1289,6 +1289,19 @@ const guard = await page.evaluate(() => {
 check('looks: frames that cost more than they return step the chain down, and the world keeps drawing',
   guard.downgraded && guard.target !== 'full' && guard.drew, guard);
 
+// ---- compressed models -------------------------------------------------------------------------
+// Every model that meets the 500 kB budget is a compressed model, and `EXT_meshopt_compression`
+// lands in the glTF's `extensionsRequired` — a loader without the decoder throws outright rather
+// than degrading. So a world missing it looks perfect right up until someone optimises a model,
+// and then shows nothing and says nothing. The fixture is a real compressed file, 7 kB, with walk
+// data through the same read the world uses.
+const meshopt = await page.evaluate(async () => {
+  try { return { ok: true, ...(await window.world.probeModel('/models/meshopt-box.glb')) }; }
+  catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+});
+check('models: a meshopt-compressed model opens — geometry decoded and walk data intact',
+  meshopt.ok && meshopt.meshes > 0 && meshopt.triangles > 0 && meshopt.solids > 0, meshopt);
+
 // ---- nothing threw ------------------------------------------------------------------------------
 const real = errs.filter(e => !/WebGL|GL_INVALID|swiftshader|GPU stall|Failed to load resource/i.test(e));
 check('no page errors', real.length === 0, real.slice(0, 4));
