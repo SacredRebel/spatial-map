@@ -1,9 +1,9 @@
 {
   "name": "spatial-map",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "private": true,
   "type": "module",
-  "description": "The walkable world \u2014 a browser-native open world over real 1 m terrain, one world per community.",
+  "description": "The walkable world — a browser-native open world over real 1 m terrain, one world per community.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@pixiv/three-vrm": "^3.5.5",
+    "@sparkjsdev/spark": "^2.2.0",
     "three": "^0.180.0"
   },
   "devDependencies": {

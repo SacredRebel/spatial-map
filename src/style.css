@@ -230,3 +230,16 @@ canvas { display: block; touch-action: none; }
 .mg-chips { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 10px 0; }
 .mg-chip { border: 1px solid rgba(245,197,66,0.45); background: rgba(245,197,66,0.08); color: var(--ink); border-radius: 999px; padding: 3px 9px; font: 500 11px var(--font); cursor: pointer; }
 .mg-chip:hover { background: rgba(245,197,66,0.2); }
+
+/* bring in: the file button, the photo options, the jobs, what has been brought in */
+.ep-form .ep-file { justify-content: center; cursor: pointer; }
+.ep-form > small { grid-column: 1 / -1; }
+.ep-form .ep-note, .ep-photo, .ep-jobs, .ep-imports { grid-column: 1 / -1; }
+.ep-photo { display: grid; gap: 4px; padding: 6px 8px; border-radius: 8px; background: rgba(245,197,66,0.08); }
+.ep-photo b { color: #f5c542; }
+.ep-photo .bad, .ep-item.bad { color: #f0a070; }
+.ep-jobs .ep-item { display: flex; align-items: center; gap: 6px; }
+.ep-thumb { width: 28px; height: 28px; border-radius: 4px; object-fit: cover; flex: none; }
+.ep-imports { display: grid; gap: 2px; }
+.ep-link { all: unset; cursor: pointer; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.06); color: var(--ink); }
+.ep-link:hover { color: #4fd1c5; }

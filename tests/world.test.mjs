@@ -1718,6 +1718,126 @@ check('context: every street lies on the ground as drawn — sampled, none of it
   ctxT.n > 200 && ctxT.under === 0, { sampled: ctxT.n, under: ctxT.under, worst: ctxT.worst });
 check('context: the grass is told where the streets and creek beds are', ctxT.bare >= ctxT.counts.roads, { bare: ctxT.bare });
 
+// ---- brought in: a model, a phone scan, a photo made into a model ---------------------------------
+//   The owner walks the land, scans it with a phone, photographs a bench, exports a model from the
+//   studio — and drops each on the world. What is checked: each stands on the ground where it was
+//   put, turns and lifts and scales as asked, a scan is stood upright with its strays hidden, and a
+//   photo goes through the atlas (stubbed here, so no credits) and comes back as a model standing
+//   where the click was.
+const bring = await page.evaluate(async ([BASE]) => {
+  const w = window.world, ed = w.editor, T = w.THREE;
+  w.setSession({ role: 'builder', pin: null });
+  ed.setActive(true);
+  const o = w.frame.toLngLat(w.player.position.x, w.player.position.z);
+  const MX = 111320 * Math.cos(o.lat * Math.PI / 180), MY = 110574;
+  const at = (e, n) => [o.lng + e / MX, o.lat + n / MY];
+  const wait = async (fn, ms = 60000) => { const t0 = Date.now(); while (!fn() && Date.now() - t0 < ms) await new Promise(r => setTimeout(r, 100)); return fn(); };
+  const rootOf = id => w.imports.group.children.find(c => c.name === 'import:' + id);
+  const out = {};
+  // a model, through the tool: choose, then click
+  const glb = await (await fetch(`${BASE}/models/fixture-house.glb`)).blob();
+  ed.setTool('bring');
+  ed.bring(new File([glb], 'studio-house.glb'), 'studio-house.glb');
+  out.waits = ed.tool === 'bring' && ed.bringing?.sort === 'model';
+  const pos = at(14, 9);
+  const m = await ed.bringAt(pos);
+  const r = rootOf(m.id);
+  out.model = { native: m.native, y: r.position.y, ground: w.field.atOr(pos[0], pos[1], NaN), sel: ed.selection?.kind, kept: w.imports.items.length };
+  ed.turnImport(m.id, 30); ed.liftImport(m.id, 0.5);
+  ed.setImport(m.id, { scale: 2 });
+  out.moved = { rotY: +r.rotation.y.toFixed(4), want: +(-30 * Math.PI / 180).toFixed(4), dy: +(r.position.y - out.model.ground).toFixed(3), scale: r.scale.x, h: +ed.importHeight(w.imports.item(m.id)).toFixed(2) };
+
+  // a scan: a synthetic splat, y-down like a phone capture — a 6 m ground disc, a 3 m post, and strays in the sky
+  const N = 6000, strays = 60, props = ['x','y','z','f_dc_0','f_dc_1','f_dc_2','opacity','scale_0','scale_1','scale_2','rot_0','rot_1','rot_2','rot_3'];
+  const head = `ply\nformat binary_little_endian 1.0\nelement vertex ${N + strays}\n${props.map(p => `property float ${p}\n`).join('')}end_header\n`;
+  const buf = new ArrayBuffer(head.length + (N + strays) * props.length * 4);
+  new Uint8Array(buf).set(new TextEncoder().encode(head));
+  const dv = new DataView(buf, head.length);
+  let k = 0; const put = v => { dv.setFloat32(k, v, true); k += 4; };
+  let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < N + strays; i++) {
+    let x, y, z;
+    if (i >= N) { x = (rnd() - 0.5) * 120; y = -30 - rnd() * 20; z = (rnd() - 0.5) * 120; }                  // strays, high above (y down)
+    else if (i < N * 0.8) { const a = rnd() * 6.283, rr = 6 * Math.sqrt(rnd()); x = rr * Math.cos(a); y = 1.6; z = rr * Math.sin(a); }   // ground, 1.6 m below the phone
+    else { x = 1 + (rnd() - 0.5) * 0.3; y = 1.6 - rnd() * 3; z = -1 + (rnd() - 0.5) * 0.3; }                 // a post, 3 m up
+    put(x); put(y); put(z); put(0.5); put(0.2); put(-0.3); put(3); put(Math.log(0.08)); put(Math.log(0.08)); put(Math.log(0.08)); put(1); put(0); put(0); put(0);
+  }
+  const spos = at(-16, 12);
+  ed.bring(new File([buf], 'walk.ply'), 'walk.ply', spos);
+  await wait(() => w.imports.items.some(i => i.kind === 'splat' && i.native));
+  const sc = w.imports.items.find(i => i.kind === 'splat');
+  const sr = sc && rootOf(sc.id);
+  const mesh = sr?.children.find(c => !!c.packedSplats);
+  let hidden = 0, up = 0;
+  if (mesh) {
+    mesh.updateMatrixWorld(true);
+    const v = new T.Vector3();
+    mesh.forEachSplat((i, c, s, q, op) => { if (op < 0.01) hidden++; if (i >= N * 0.8 && i < N) { v.copy(c).applyMatrix4(mesh.matrixWorld); if (v.y > sr.position.y + 1) up++; } });
+  }
+  out.scan = sc && { native: sc.native, flip: sc.flip, y: sr.position.y, ground: w.field.atOr(spos[0], spos[1], NaN), hidden, up, handle: sr.children.some(c => c.name === '' && c.geometry?.type === 'CircleGeometry'), spark: !!w.scene.getObjectByName('spark') };
+  // picked by the ring at its middle, not by the splats
+  ed.selectImport(sc.id);
+  out.scanSel = ed.selection?.kind === 'import' && ed.selection.id === sc.id;
+
+  // a photo: the atlas is stubbed, so this spends nothing
+  const real = window.fetch;
+  const calls = [];
+  window.fetch = async (u, init) => {
+    const url = String(u);
+    if (!url.includes('/api/image3d')) return real(u, init);
+    const b = init?.body ? JSON.parse(init.body) : {};
+    calls.push({ path: url.replace(/^.*\/api/, '/api'), pin: b.pin, kind: b.kind, jpeg: String(b.image || '').startsWith('data:image/jpeg;base64,') });
+    const json = (o, st = 200) => new Response(JSON.stringify(o), { status: st, headers: { 'content-type': 'application/json' } });
+    if (b.pin !== '4321') return json({ ok: false, error: 'bad_pin' }, 401);
+    if (url.endsWith('/api/image3d')) return json({ ok: true, provider: 'meshy', task: 'task-0000abcd' });
+    if (url.endsWith('/status')) return json({ ok: true, status: 'done', progress: 100, bytes: glb.size });
+    if (url.endsWith('/part')) return new Response(await glb.slice(b.from, b.to + 1).arrayBuffer());
+    return json({ ok: false }, 404);
+  };
+  const c = document.createElement('canvas'); c.width = 2400; c.height = 1600; const g = c.getContext('2d'); g.fillStyle = '#b85'; g.fillRect(0, 0, 2400, 1600);
+  const jpg = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.9));
+  const ppos = at(4, -14);
+  ed.bring(new File([jpg], 'bench.jpg'), 'bench.jpg', ppos);                 // no PIN yet
+  await wait(() => ed.jobs.length && ['failed', 'done'].includes(ed.jobs[ed.jobs.length - 1].stage), 10000);
+  out.noPin = ed.jobs[ed.jobs.length - 1]?.stage;
+  w.setSession({ role: 'builder', pin: '4321' });
+  ed.setActive(true);
+  ed.photo.kind = 'object'; ed.photo.height = 1.5;
+  ed.bring(new File([jpg], 'bench.jpg'), 'bench.jpg', ppos);
+  const tp = Date.now();
+  await wait(() => ['failed', 'done'].includes(ed.jobs[ed.jobs.length - 1].stage), 120000);
+  const photoMs = Date.now() - tp;
+  window.fetch = real;
+  const job = ed.jobs[ed.jobs.length - 1];
+  const made = w.imports.items.find(i => i.source === 'meshy');
+  const mr = made && rootOf(made.id);
+  out.photo = { stage: job.stage, message: job.message, calls: calls.map(x => x.path), jpeg: calls.find(x => x.path === '/api/image3d' && x.pin === '4321')?.jpeg, h: made ? +ed.importHeight(made).toFixed(2) : null, y: mr?.position.y, ground: w.field.atOr(ppos[0], ppos[1], NaN), pending: w.imports.group.children.filter(x => x.name.startsWith('pending:')).length, ms: photoMs };
+
+  // and a file dropped on the world lands where it was dropped
+  const before = w.imports.items.length;
+  const dt = new DataTransfer(); dt.items.add(new File([glb], 'dropped.glb'));
+  const cv = w.renderer.domElement;
+  cv.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, clientX: cv.clientWidth / 2, clientY: cv.clientHeight * 0.75, dataTransfer: dt }));
+  await wait(() => w.imports.items.length > before, 15000);
+  out.dropped = w.imports.items.length - before;
+  // take them all away again, so nothing after this sees them
+  for (const i of w.imports.items.slice()) await w.imports.remove(i.id);
+  out.left = w.imports.items.length;
+  ed.select(null);
+  w.setSession({ role: 'member', pin: null });
+  return out;
+}, [BASE]);
+check('bring: a model chosen with the tool waits for a click, then stands on the ground there, selected and kept',
+  bring.waits && bring.model.native?.[2] > 1 && Math.abs(bring.model.y - bring.model.ground) < 0.05 && bring.model.sel === 'import' && bring.model.kept === 1, bring.model);
+check('bring: it turns, lifts and scales as asked', Math.abs(bring.moved.rotY - bring.moved.want) < 1e-3 && Math.abs(bring.moved.dy - 0.5) < 0.01 && bring.moved.scale === 2, bring.moved);
+check('bring: a phone scan (a splat) is drawn by Spark, stood upright, its ground on the hill, its strays in the sky hidden',
+  !!bring.scan && bring.scan.spark && bring.scan.flip && Math.abs(bring.scan.y - bring.scan.ground) < 0.05 && bring.scan.up >= 600 && bring.scan.hidden >= 50 && bring.scan.native[2] > 2 && bring.scan.native[2] < 5, bring.scan);
+check('bring: a scan is selected by its ring', bring.scanSel === true);
+check('bring: a photo without a PIN is refused before anything is spent', bring.noPin === 'failed');
+check('bring: a photo goes to the atlas as a small JPEG, comes back as a model, and stands where it was put at the height asked',
+  bring.photo.stage === 'done' && bring.photo.jpeg === true && bring.photo.calls.includes('/api/image3d/part') && Math.abs(bring.photo.h - 1.5) < 0.02 && Math.abs(bring.photo.y - bring.photo.ground) < 0.05 && bring.photo.pending === 0, bring.photo);
+check('bring: a file dropped on the world lands, and everything brought in can be taken away again', bring.dropped === 1 && bring.left === 0, { dropped: bring.dropped, left: bring.left });
+
 // ---- nothing threw ------------------------------------------------------------------------------
 const real = errs.filter(e => !/WebGL|GL_INVALID|swiftshader|GPU stall|Failed to load resource/i.test(e));
 check('no page errors', real.length === 0, real.slice(0, 4));

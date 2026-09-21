@@ -7,6 +7,7 @@ import type { Editor, Pick, Tool } from './editor';
 import type { Caps, Role } from '../world/roles';
 import { MATERIAL_NAMES, ROOF_FORMS, STRUCTURES, INFILLS, INSULATIONS, ROOF_FINISHES, type Opening } from '../world/build';
 import { ORGANIC_FORMS, type OrganicSpec, type Quantities } from '../world/organic';
+import { ACCEPT, megabytes, type ImportItem } from '../world/imports';
 
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
 const FT = 0.3048;
@@ -27,6 +28,7 @@ const TOOLS: { id: Tool; key: string; label: string; hint: string; needs?: keyof
   { id: 'roof', key: 'R', label: '⌂ roof', hint: 'click the corners the roof covers · Enter to raise it', needs: 'place', group: 'build' },
   { id: 'opening', key: 'O', label: '▯ door / window', hint: 'click a wall where the opening goes', needs: 'place', group: 'build' },
   { id: 'organic', key: 'K', label: '🌿 organic', hint: 'click round the ground it may use · Enter grows a building that fits inside, eave and all', needs: 'place', group: 'build' },
+  { id: 'bring', key: 'I', label: '📥 bring in', hint: 'a model (.glb), a phone scan (.spz .ply .splat .sog) or a photo — choose it, then click the ground where it goes · or drop the file on the world', needs: 'place' },
   { id: 'mark', key: 'M', label: '✦ mark for AI', hint: 'press and draw round ground or walls (or click corners, Enter) · then tell the agent what to do there', group: 'build' }
 ];
 
@@ -109,7 +111,7 @@ export class Panel {
       <div class="ep-tools">${tools.filter(t => !t.group).map(button).join('')}</div>
       ${building.length ? `<div class="ep-tools ep-build"><span class="ep-group">build</span>${building.map(button).join('')}<button class="ep-tool" data-act="room" title="a floor, a closed wall with a door, and a roof, put down in one go where you stand">⌂ room…</button></div>` : ''}
       <div class="ep-hint">${esc(TOOLS.find(t => t.id === e.tool)?.hint ?? '')}</div>
-      ${e.tool === 'block' ? this.blockForm() : e.tool === 'terrain' ? this.shapeForm() : e.tool === 'zone' ? this.zoneForm() : e.tool === 'wall' ? this.wallForm() : e.tool === 'floor' ? this.floorForm() : e.tool === 'roof' ? this.roofForm() : e.tool === 'opening' ? this.openingForm() : e.tool === 'organic' ? this.organicForm() : e.tool === 'mark' ? this.markForm() : ''}
+      ${e.tool === 'block' ? this.blockForm() : e.tool === 'terrain' ? this.shapeForm() : e.tool === 'zone' ? this.zoneForm() : e.tool === 'wall' ? this.wallForm() : e.tool === 'floor' ? this.floorForm() : e.tool === 'roof' ? this.roofForm() : e.tool === 'opening' ? this.openingForm() : e.tool === 'organic' ? this.organicForm() : e.tool === 'mark' ? this.markForm() : e.tool === 'bring' ? this.bringForm() : ''}
       ${busy}
       ${this.selection(e.selection)}
       <div class="ep-list">${this.list()}</div>
@@ -187,6 +189,68 @@ export class Panel {
     height?.addEventListener('change', () => { const s = e.selection; if (s?.kind === 'structure') e.setHeight(s.id, Number(height.value)); });
     const name = this.root.querySelector<HTMLInputElement>('[data-name]');
     name?.addEventListener('change', () => { const s = e.selection; if (s?.kind === 'structure') e.rename(s.id, name.value); });
+    // brought in: the file picker, what a photo is of, and the sliders on a selected one
+    const file = this.root.querySelector<HTMLInputElement>('[data-bring-file]');
+    file?.addEventListener('change', () => { const f = file.files?.[0]; if (f) e.bring(f, f.name); });
+    this.root.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-photo]').forEach(i => i.addEventListener('change', () => {
+      if (i.dataset.photo === 'kind') e.photo.kind = i.value === 'building' ? 'building' : 'object';
+      else { const v = Number(i.value); e.photo.height = isFinite(v) && v > 0 ? v : 0; }
+    }));
+    this.root.querySelectorAll<HTMLElement>('[data-imp-sel]').forEach(b => b.addEventListener('click', () => e.selectImport(b.dataset.impSel!)));
+    this.root.querySelectorAll<HTMLInputElement>('[data-imp]').forEach(i => {
+      i.addEventListener('input', () => { const o = i.parentElement?.querySelector('output'); if (o && i.type === 'range') o.textContent = i.dataset.imp === 'turn' ? `${i.value}°` : `${Number(i.value).toFixed(2)} m`; });
+      i.addEventListener('change', () => {
+        const s = e.selection;
+        if (s?.kind !== 'import') return;
+        const k = i.dataset.imp!;
+        if (k === 'flip') e.setImport(s.id, { flip: i.checked });
+        else if (k === 'tidy') e.setImport(s.id, { tidy: i.checked });
+        else if (k === 'name') e.setImport(s.id, { name: i.value.trim() || s.item.name });
+        else if (k === 'height') { const h = Number(i.value); const nat = s.item.native?.[2] ?? 0; if (h > 0 && nat > 0.001) e.setImport(s.id, { scale: Math.round(h / nat * 1000) / 1000 }); }
+        else { const v = Number(i.value); if (isFinite(v)) e.setImport(s.id, { [k]: v }); }
+      });
+    });
+  }
+
+  /** the bring-in tool: choose a file, then click where it goes */
+  private bringForm(): string {
+    const e = this.editor;
+    const b = e.bringing;
+    const svc = e.photoProviders;
+    const waiting = b ? `<div class="ep-note">now click the ground where <b>${esc(b.name)}</b> goes${b.sort === 'photo' ? ' — the AI makes the model there' : ''} · Esc cancels</div>` : '';
+    const photo = b?.sort === 'photo' || !b ? `<div class="ep-photo"><b>photo → 3D</b> ${svc === null ? '<small>asking the atlas…</small>' : svc.length ? `<small>by ${esc(svc.join(', '))} · about 30 credits each</small>` : '<small class="bad">the atlas has no 3D key yet — add MESHY_API_KEY to its settings</small>'}
+        <label class="ep-inline">it is <select data-photo="kind"><option value="object" ${e.photo.kind === 'object' ? 'selected' : ''}>a thing</option><option value="building" ${e.photo.kind === 'building' ? 'selected' : ''}>a building</option></select></label>
+        <label class="ep-inline">about <input data-photo="height" type="number" min="0" max="60" step="0.1" value="${e.photo.height || ''}" placeholder="auto"> m tall</label>
+        <small>one clear photo of one thing, against a plain background if you can</small></div>` : '';
+    const jobs = e.jobs.slice(-4).reverse().map(j => `<div class="ep-item ${j.stage === 'failed' ? 'bad' : ''}">${j.thumb ? `<img class="ep-thumb" src="${esc(j.thumb)}" alt="">` : ''}${esc(j.name)} · ${j.stage === 'making' ? `making ${j.progress}%` : j.stage === 'fetching' ? `fetching ${j.progress}%` : j.stage}${j.message ? ` — ${esc(j.message)}` : ''}</div>`).join('');
+    const items = e.importItems();
+    const list = items.length ? `<div class="ep-imports"><b>brought in</b> <small>kept in this browser</small>${items.slice(-8).reverse().map(i => `<button class="ep-item ep-link" data-imp-sel="${esc(i.id)}">${i.kind === 'splat' ? '🌀' : '🧊'} ${esc(i.name)} · ${megabytes(i.bytes)}</button>`).join('')}</div>` : '';
+    return `<div class="ep-form">
+      <label class="btn ep-file">📂 choose a file…<input data-bring-file type="file" accept="${ACCEPT}" hidden></label>
+      <small>or drop it anywhere on the world · models .glb · scans .spz .ply .splat .ksplat .sog · photos .jpg .png</small>
+      ${waiting}${photo}${jobs ? `<div class="ep-jobs">${jobs}</div>` : ''}${list}
+    </div>`;
+  }
+
+  /** a model or a scan that was brought in: where and how it stands */
+  private importCard(item: ImportItem): string {
+    const e = this.editor;
+    const can = this.o.caps().place;
+    const dis = can ? '' : 'disabled';
+    const h = e.importHeight(item);
+    const scan = item.kind === 'splat';
+    return `<div class="ep-sel"><label class="ep-inline">name <input data-imp="name" value="${esc(item.name)}" ${dis}></label> <small>${scan ? 'scan' : 'model'} · .${esc(item.ext)} · ${megabytes(item.bytes)}${item.source !== 'file' ? ` · by ${esc(item.source)}` : ''}</small>
+      <div class="ep-dim">${esc(e.describeImport(item).split(' · ').slice(2).join(' · '))}</div>
+      ${scan
+        ? `<label class="ep-range">scale <input data-imp="scale" type="range" min="0.1" max="4" step="0.01" value="${item.scale}" ${dis}><output>${item.scale.toFixed(2)}</output></label>`
+        : `<label class="ep-inline">height <input data-imp="height" type="number" min="0.05" max="200" step="0.1" value="${h.toFixed(2)}" ${dis}> m</label>`}
+      <label class="ep-range">turn <input data-imp="turn" type="range" min="-180" max="180" step="1" value="${item.turn}" ${dis}><output>${item.turn}°</output></label>
+      <label class="ep-range">lift <input data-imp="lift" type="range" min="-8" max="12" step="0.05" value="${item.lift}" ${dis}><output>${item.lift.toFixed(2)} m</output></label>
+      ${scan ? `<label class="ep-check"><input data-imp="flip" type="checkbox" ${item.flip ? 'checked' : ''} ${dis}> stand it upright (most scans need this)</label>
+      <label class="ep-check"><input data-imp="tidy" type="checkbox" ${item.tidy !== false ? 'checked' : ''} ${dis}> hide stray splats (sky, noise)</label>` : ''}
+      ${can ? `<div class="ep-row"><button class="btn" data-act="imp-dl" title="save the file itself">⤓ file</button><button class="btn" data-act="remove">✕ remove</button></div>
+      <div class="muted">drag it across the ground to move it · [ ] turn · + − lift${scan ? ' · a scan is picked by the ring at its middle' : ''}</div>` : ''}
+    </div>`;
   }
 
   private blockForm(): string {
@@ -357,6 +421,8 @@ export class Panel {
       }
       case 'ground':
         return `<div class="ep-sel muted">ground · ${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}</div>`;
+      case 'import':
+        return this.importCard(p.item);
     }
   }
 
@@ -413,6 +479,7 @@ export class Panel {
       case 'talk': if (s?.kind === 'note' && s.magic) e.openMagic(s.id); break;
       case 'move': if (s?.kind === 'vision') e.beginMove(s.id, s.name); break;
       case 'remove': if (s) e.remove(s); break;
+      case 'imp-dl': if (s?.kind === 'import') void e.downloadImport(s.id); break;
       case 'rot-': if (s?.kind === 'structure') e.rotateStructure(s.id, -15); else if (s?.kind === 'build') e.rotateBuild(s.id, -15); break;
       case 'rot+': if (s?.kind === 'structure') e.rotateStructure(s.id, 15); else if (s?.kind === 'build') e.rotateBuild(s.id, 15); break;
       case 'remove-structure': if (s?.kind === 'build' && s.feature.properties.structure) e.removeStructureParts(String(s.feature.properties.structure)); break;

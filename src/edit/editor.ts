@@ -34,8 +34,10 @@ import { Along, wallLine, MATERIALS, type Build, type Opening, type RoofForm } f
 import type { Caps } from '../world/roles';
 import type { GroundGrid } from './grid';
 import { organicPlan, cleanSpec, ORGANIC_DEFAULT, roofMaterialFor, type OrganicSpec, type Quantities } from '../world/organic';
+import { sortOf, megabytes, type Imports, type ImportItem } from '../world/imports';
+import { photoToJpeg, type Photo3D, type Photo3DKind } from './photo3d';
 
-export type Tool = 'select' | 'marker' | 'tree' | 'fence' | 'path' | 'road' | 'block' | 'magic' | 'zone' | 'terrain' | 'wall' | 'floor' | 'roof' | 'opening' | 'organic' | 'mark';
+export type Tool = 'select' | 'marker' | 'tree' | 'fence' | 'path' | 'road' | 'block' | 'magic' | 'zone' | 'terrain' | 'wall' | 'floor' | 'roof' | 'opening' | 'organic' | 'mark' | 'bring';
 
 export interface ShapeSpec { op: 'flatten' | 'raise' | 'lower'; height: number; edge: number }
 export interface ZoneSpec { name: string; kind: string }
@@ -54,6 +56,7 @@ export type Pick =
   | { kind: 'building'; name: string; object: THREE.Object3D; point: THREE.Vector3 }
   | { kind: 'structure'; id: string; structure: Structure; object: THREE.Object3D; point: THREE.Vector3 }
   | { kind: 'build'; id: string; feature: Feature; object: THREE.Object3D; point: THREE.Vector3 }
+  | { kind: 'import'; id: string; item: ImportItem; object: THREE.Object3D; point: THREE.Vector3 }
   | { kind: 'ground'; point: THREE.Vector3; lng: number; lat: number };
 
 export interface BlockSpec { name: string; w: number; d: number; h: number }
@@ -75,6 +78,10 @@ export interface ModifySpec {
 
 /** a marked piece of ground: the ring, and the parts it takes in */
 export interface Mark { ring: [number, number][]; selected: string[]; areaM2: number }
+/** a file waiting for a ground click to say where it goes */
+export interface Bringing { file: Blob; name: string; sort: 'model' | 'splat' | 'photo' }
+/** a photo on its way to being a model */
+export interface PhotoJob { id: string; name: string; at: [number, number]; stage: 'shrinking' | 'sending' | 'making' | 'fetching' | 'placing' | 'done' | 'failed'; progress: number; message?: string; thumb?: string | null }
 
 export interface EditorOpts {
   dom: HTMLElement;
@@ -86,6 +93,10 @@ export interface EditorOpts {
   today: Today;
   structures: Structures;
   build: Build;
+  /** what was brought in from outside: models and scans, kept in this browser */
+  imports: Imports;
+  /** the atlas's photo → model service; absent in tests that do not need it */
+  photo3d?: Photo3D;
   grid: GroundGrid;
   scene: THREE.Scene;
   /** the pack, once it has loaded; null before */
@@ -170,7 +181,15 @@ export class Editor {
   private counter = 0;
   private lastHover = 0;
   private swallowClick = false;
-  private drag: { id: string; kind: 'structure' | 'build'; start: Structure | Feature; from: THREE.Vector3; moved: boolean } | null = null;
+  private drag: { id: string; kind: 'structure' | 'build' | 'import'; start: Structure | Feature | ImportItem; from: THREE.Vector3; moved: boolean } | null = null;
+  /** the file the next ground click puts down (the bring-in tool) */
+  bringing: Bringing | null = null;
+  /** what a photo is of, and roughly how tall, before it becomes a model */
+  photo: { kind: Photo3DKind; height: number } = { kind: 'object', height: 0 };
+  /** photos being made into models */
+  jobs: PhotoJob[] = [];
+  /** the 3D services the atlas has a key for; null until asked */
+  photoProviders: string[] | null = null;
 
   constructor(private o: EditorOpts) {
     this.group.name = 'editor';
@@ -257,6 +276,7 @@ export class Editor {
   /** abandon whatever is half done: a move, a line */
   cancel() {
     this.moving = null;
+    if (this.tool !== 'bring') this.bringing = null;
     this.drawing = [];
     this.drag = null;
     this.preview.visible = false;
@@ -316,7 +336,7 @@ export class Editor {
   pick(clientX: number, clientY: number): Pick | null {
     const pack = this.o.pack();
     const ray = this.rayAt(clientX, clientY);
-    const targets: THREE.Object3D[] = [...this.o.vegetation.recordMeshes, this.o.today.group, this.o.structures.group, this.o.build.group];
+    const targets: THREE.Object3D[] = [...this.o.vegetation.recordMeshes, this.o.today.group, this.o.structures.group, this.o.build.group, this.o.imports.group];
     const hits = ray.intersectObjects(targets, true);
     const groundPoint = this.ground(ray.ray);
     const groundDist = groundPoint ? groundPoint.distanceTo(ray.ray.origin) : Infinity;
@@ -328,6 +348,16 @@ export class Editor {
         if (idx != null && pack.trees[idx]) return { kind: 'tree', index: idx, tree: pack.trees[idx], point: hit.point };
         continue;
       }
+      // something brought in: its meshes carry their own names, so look for the import above them
+      let up: THREE.Object3D | null = obj;
+      while (up && !up.name.startsWith('import:') && up.parent) up = up.parent;
+      if (up && up.name.startsWith('import:')) {
+        const id = up.name.slice(7);
+        const item = this.o.imports.item(id);
+        if (item) return { kind: 'import', id, item, object: this.o.imports.bounds(id) ?? up, point: hit.point };
+        continue;
+      }
+      if (obj.name.startsWith('pending:')) continue;
       // walk up to the named marker / line / building / structure
       let o: THREE.Object3D | null = obj;
       while (o && !o.name && o.parent) o = o.parent;
@@ -439,6 +469,11 @@ export class Editor {
       this.box.visible = true;
       if (shown.kind === 'structure') this.showDims(shown.structure);
       if (shown.kind === 'build') this.showBuildDims(shown.feature, shown.object);
+      if (shown.kind === 'import') {
+        const b = new THREE.Box3().setFromObject(shown.object);
+        const c = b.getCenter(new THREE.Vector3());
+        this.showLabel(this.describeImport(shown.item), c.x, b.max.y + 1.2, c.z);
+      }
     }
   }
 
@@ -544,6 +579,11 @@ export class Editor {
       }
       if (!this.active || e.button !== 0 || this.tool !== 'select' || this.moving || !this.o.caps().place) return;
       const p = this.pick(e.clientX, e.clientY);
+      if (p && p.kind === 'import') {
+        const g = this.ground(this.rayAt(e.clientX, e.clientY).ray);
+        if (g) { this.drag = { id: p.id, kind: 'import', start: JSON.parse(JSON.stringify(p.item)), from: g, moved: false }; d.setPointerCapture?.(e.pointerId); }
+        return;
+      }
       if (p && (p.kind === 'structure' || p.kind === 'build')) {
         const g = this.ground(this.rayAt(e.clientX, e.clientY).ray);
         if (g) {
@@ -566,6 +606,7 @@ export class Editor {
       if (!this.drag) return;
       const was = this.drag;
       this.drag = null;
+      if (was.kind === 'import') { if (was.moved) { this.o.imports.save(was.id); this.selectImport(was.id); } return; }
       if (!was.moved) { this.history.pop(); return; }
       if (was.kind === 'structure') this.selectStructure(was.id); else this.selectBuild(was.id);
       this.persist();
@@ -599,6 +640,11 @@ export class Editor {
       else if (k === 'o') this.setTool('opening');
       else if (k === 'k') this.setTool('organic');
       else if (k === 'm') this.setTool('mark');
+      else if (k === 'i') this.setTool('bring');
+      else if (k === '[' && this.selection?.kind === 'import') this.turnImport(this.selection.id, -SNAP_DEG);
+      else if (k === ']' && this.selection?.kind === 'import') this.turnImport(this.selection.id, SNAP_DEG);
+      else if ((k === '+' || k === '=') && this.selection?.kind === 'import') this.liftImport(this.selection.id, 0.25);
+      else if ((k === '-' || k === '_') && this.selection?.kind === 'import') this.liftImport(this.selection.id, -0.25);
       else if ((k === '+' || k === '=') && this.selection?.kind === 'structure') this.raiseStructure(this.selection.id, 0.25);
       else if ((k === '-' || k === '_') && this.selection?.kind === 'structure') this.raiseStructure(this.selection.id, -0.25);
       else if (k === '1') this.setTool('select');
@@ -624,6 +670,10 @@ export class Editor {
     }
     switch (this.tool) {
       case 'select': this.select(p); break;
+      case 'bring':
+        if (this.bringing && p.kind === 'ground') { void this.bringAt([p.lng, p.lat]); break; }
+        if (!this.bringing) this.select(p);
+        break;
       case 'marker': if (p.kind === 'ground') this.promptNote(p.lng, p.lat); break;
       case 'tree': if (p.kind === 'ground') this.promptTree(p.lng, p.lat); break;
       case 'block': if (p.kind === 'ground' && this.o.caps().place) this.addBlock(p.lng, p.lat, this.block, this.o.player.state().headingDeg); break;
@@ -805,6 +855,7 @@ export class Editor {
     }
     else if (p.kind === 'structure') this.removeStructure(p.id);
     else if (p.kind === 'build') this.removeBuild(p.id);
+    else if (p.kind === 'import') { void this.o.imports.remove(p.id); this.select(null); this.setHover(null); }
   }
 
   private promptNote(lng: number, lat: number) {
@@ -988,6 +1039,15 @@ export class Editor {
     const dx = g.x - this.drag.from.x, dz = g.z - this.drag.from.z;
     if (!this.drag.moved && Math.hypot(dx, dz) < 0.25) return;
     this.drag.moved = true;
+    if (this.drag.kind === 'import') {
+      // from where it started, on the half-metre, drawn live and kept once on release
+      const start = this.drag.start as ImportItem;
+      const w0 = this.o.frame.toWorld(start.position[0], start.position[1]);
+      const ll = this.o.frame.toLngLat(Math.round((w0.x + dx) / SNAP_M) * SNAP_M, Math.round((w0.z + dz) / SNAP_M) * SNAP_M);
+      this.o.imports.update(this.drag.id, { position: [ll.lng, ll.lat] }, false);
+      this.selectImport(this.drag.id);
+      return;
+    }
     if (this.drag.kind === 'build') {
       // from where it started, not from the last frame, so the snap never walks; drawn live, no history entry per frame
       const next = this.shifted(this.drag.start as Feature, dx, dz, true);
@@ -1685,6 +1745,131 @@ export class Editor {
     } catch (e) {
       return this.said(false, `not saved: ${(e as Error).message}`);
     }
+  }
+
+  // ---- brought in: models, scans, photos ------------------------------------------------------------------
+  /**
+   * A file to bring in. With a place it goes straight there; without one the tool waits for a ground
+   * click. A photo becomes a model first (through the atlas), and stands where the click was.
+   */
+  bring(file: Blob, name: string, at?: [number, number]): boolean {
+    const sort = sortOf(name);
+    if (!sort) { this.said(false, `${name}: not a model (.glb), a scan (.spz .ply .splat .ksplat .sog .rad) or a photo (.jpg .png .webp)`); return false; }
+    this.bringing = { file, name, sort };
+    if (this.tool !== 'bring') { this.tool = 'bring'; this.drawing = []; this.moving = null; }
+    if (at) { void this.bringAt(at); return true; }
+    this.o.onChange(this);
+    return true;
+  }
+
+  /** put down what is waiting, here */
+  async bringAt(at: [number, number]): Promise<ImportItem | null> {
+    const b = this.bringing;
+    if (!b) return null;
+    this.bringing = null;
+    this.o.onChange(this);
+    if (b.sort === 'photo') { void this.photoAt(b.file, b.name, at); return null; }
+    try {
+      const item = await this.o.imports.add(b.file, b.name, at);
+      this.said(true, `${item.name} brought in · ${megabytes(item.bytes)} · kept in this browser`);
+      this.selectImport(item.id);
+      return item;
+    } catch (e) {
+      this.said(false, String((e as Error)?.message || e));
+      return null;
+    }
+  }
+
+  /** a photo made into a model where it will stand; the ring turns there while it is being made */
+  private async photoAt(file: Blob, name: string, at: [number, number]) {
+    const svc = this.o.photo3d;
+    const base = name.replace(/\.[a-z0-9]+$/i, '');
+    const job: PhotoJob = { id: `job-${Date.now().toString(36)}`, name: base, at, stage: 'shrinking', progress: 0 };
+    this.jobs.push(job);
+    const step = (stage: PhotoJob['stage'], progress: number, message?: string) => { job.stage = stage; job.progress = progress; if (message !== undefined) job.message = message; this.o.onChange(this); };
+    this.o.imports.showPending(job.id, at);
+    try {
+      if (!svc) throw new Error('photo → model is not wired in this world');
+      const jpeg = await photoToJpeg(file);
+      step('sending', 0);
+      const { provider, task } = await svc.start(jpeg, this.photo.kind, base);
+      step('making', 0, `${provider} is making it — a minute or three`);
+      let st = await svc.status(provider, task);
+      const t0 = Date.now();
+      while (st.status === 'pending' || st.status === 'running') {
+        if (Date.now() - t0 > 15 * 60_000) throw new Error('the service took more than fifteen minutes — try again later');
+        await new Promise(r => setTimeout(r, 5000));
+        st = await svc.status(provider, task);
+        job.thumb = st.thumb ?? job.thumb;
+        step('making', st.progress);
+      }
+      if (st.status === 'failed' || !st.bytes) throw new Error(st.error || 'the service could not make a model from this photo');
+      step('fetching', 0, megabytes(st.bytes));
+      const blob = await svc.download(provider, task, st.bytes, share => step('fetching', Math.round(share * 100)));
+      step('placing', 100);
+      const item = await this.o.imports.add(blob, `${base}.glb`, at, { source: provider, note: `made from a photo (${this.photo.kind})` });
+      // a height asked for is a height given; otherwise the service's own guess at real size stands
+      if (this.photo.height > 0 && item.native && item.native[2] > 0.01) this.o.imports.update(item.id, { scale: Math.round(this.photo.height / item.native[2] * 1000) / 1000 });
+      step('done', 100, `${item.name} is standing where you clicked`);
+      this.selectImport(item.id);
+    } catch (e) {
+      step('failed', 0, String((e as Error)?.message || e));
+    } finally {
+      this.o.imports.hidePending(job.id);
+      this.o.onChange(this);
+    }
+  }
+
+  /** everything brought in to this pack */
+  importItems(): ImportItem[] { return this.o.imports.items; }
+
+  selectImport(id: string) {
+    const item = this.o.imports.item(id);
+    const obj = this.o.imports.bounds(id);
+    if (!item || !obj) return;
+    const c = new THREE.Box3().setFromObject(obj).getCenter(new THREE.Vector3());
+    this.select({ kind: 'import', id, item, object: obj, point: c });
+  }
+
+  turnImport(id: string, deg: number) {
+    const item = this.o.imports.item(id);
+    if (!item) return;
+    this.o.imports.update(id, { turn: ((Math.round((item.turn + deg) * 10) / 10 + 540) % 360) - 180 });
+    this.selectImport(id);
+  }
+
+  liftImport(id: string, dm: number) {
+    const item = this.o.imports.item(id);
+    if (!item) return;
+    this.o.imports.update(id, { lift: Math.round((item.lift + dm) * 100) / 100 });
+    this.selectImport(id);
+  }
+
+  /** set how it stands from the panel: any of turn, lift, scale, flip, name */
+  setImport(id: string, patch: { lift?: number; turn?: number; scale?: number; flip?: boolean; tidy?: boolean; name?: string }) {
+    this.o.imports.update(id, patch);
+    this.selectImport(id);
+  }
+
+  /** its height as drawn, in metres */
+  importHeight(item: ImportItem): number { return (item.native?.[2] ?? 0) * item.scale; }
+
+  describeImport(item: ImportItem): string {
+    const h = this.importHeight(item);
+    const w = (item.native?.[0] ?? 0) * item.scale, d = (item.native?.[1] ?? 0) * item.scale;
+    return `${item.name} · ${item.kind === 'splat' ? 'scan' : 'model'} · ${w.toFixed(1)} × ${d.toFixed(1)} m, ${h.toFixed(1)} m high`;
+  }
+
+  /** hand the file back (a download), so what is only in this browser can be kept elsewhere too */
+  async downloadImport(id: string) {
+    const item = this.o.imports.item(id);
+    const blob = await this.o.imports.file(id);
+    if (!item || !blob) return;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${item.name}.${item.ext}`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   }
 
   private said(ok: boolean, message: string) {

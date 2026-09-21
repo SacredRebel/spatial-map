@@ -55,6 +55,8 @@ import { makeGltfLoader } from './world/gltf';
 import { placeOf } from './world/structures';
 import { buildSite, refGlbOf, type EcoSite } from './world/site';
 import { Looks, type Quality } from './world/looks';
+import { Imports, sortOf } from './world/imports';
+import { Photo3D } from './edit/photo3d';
 import './style.css';
 
 const DEFAULT_ATLAS = 'https://eco-village-map.vercel.app';
@@ -203,6 +205,8 @@ const looks = new Looks({ renderer, scene, camera, want: looksWant });
 const structures = new Structures(frame, field, atlas);
 const today = new Today(frame, field);
 const build = new Build(frame, field);
+/** models, phone scans and photo-made models brought in from outside, kept in this browser */
+const imports = new Imports(frame, field, renderer, scene);
 
 /**
  * Everything a body can stand on or walk into, gathered from the registry, the record, and what
@@ -313,7 +317,7 @@ if (roleParam === 'builder' || roleParam === 'admin') session = { role: rolePara
 const caps = () => CAPS[session.role];
 const grid = new GroundGrid(frame, field);
 
-scene.add(terrain.group, vegetation.group, grass.group, context.group, structures.group, today.group, build.group, player.object, grid.group, footGroup);
+scene.add(terrain.group, vegetation.group, grass.group, context.group, structures.group, today.group, build.group, imports.group, player.object, grid.group, footGroup);
 sky.addTo(scene);
 
 // the clock is the community's own wall time, not the viewer's: a shadow at half past two means
@@ -341,16 +345,19 @@ const hud = new Hud(app, {
 player.lookScale = lookScale0;
 player.camDist = camDist0;
 
+/** a photo made into a model by the atlas; the PIN is the one this browser signed in with */
+const photo3d = new Photo3D(atlas, () => session.pin);
 const editor = new Editor({
-  dom: renderer.domElement, camera, frame, field, player, vegetation, today, structures, build, grid, scene, atlas,
+  dom: renderer.domElement, camera, frame, field, player, vegetation, today, structures, build, imports, photo3d, grid, scene, atlas,
   pack: () => pack,
   pid: () => pid,
   structuresBase: () => structuresBase,
   caps,
   onNeedRole: async () => { if (!caps().edit) await signIn(); return caps().edit; },
   rebuild: (edits, changes) => rebuild(edits, changes),
-  onChange: () => { panel.render(); magic.open(editor.magicOpen); hud.setMode(player.mode === 'fly', editor.active); }
+  onChange: () => { panel.render(); magic.open(editor.magicOpen); hud.setMode(player.mode === 'fly', editor.active); imports.setEditing(editor.active); }
 });
+imports.onChange = () => { if (editor.active) panel.render(); };
 const magic = new Magic(app, editor, { atlas, pack: () => pack, session: () => session, heading: () => player.state().headingDeg });
 const panel = new Panel(app, editor, {
   askPin: () => session.pin ?? window.prompt('The atlas PIN:'),
@@ -689,6 +696,9 @@ async function boot() {
 
   hud.setLoading(null);
   ready = true;
+  // what was brought in here before, and whether the atlas can make models from photos
+  void imports.restore(pack?.manifest.id ?? slug);
+  void photo3d.providers().then(list => { editor.photoProviders = list; if (editor.active) panel.render(); });
   // the streets and the creeks: a small file beside the world, in the background
   if (contextOn) void context.load(`${import.meta.env.BASE_URL}context/${slug}.json`).then(ok => {
     if (!ok) return;
@@ -731,6 +741,7 @@ function loop() {
     if (eye) player.placeEye(eye.lng, eye.lat, eye.altitudeM, eye.headingDeg, eye.pitchDeg);
     player.update(dt);
     editor.frame();
+    imports.tick();
     const p = player.position;
     terrain.update(p.x, p.z, FINE);
     vegetation.update(p.x, p.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity, exclude: packRing(), wet: context.creekLines });
@@ -754,6 +765,36 @@ function loop() {
   }
   looks.render(dt);
 }
+
+/**
+ * Drop a file on the world: a model, a phone scan or a photo lands where it was dropped.
+ *
+ *   The same thing the bring-in tool does, without finding the tool first. It needs the building
+ *   tools (anyone can take them for this browser), because what lands is an edit like any other.
+ */
+addEventListener('dragover', e => {
+  if (e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }
+});
+addEventListener('drop', e => {
+  const f = e.dataTransfer?.files?.[0];
+  if (!f) return;
+  e.preventDefault();
+  if (!sortOf(f.name)) { hud.setNotice(`${f.name}: not a model (.glb), a scan (.spz .ply .splat .sog) or a photo (.jpg .png)`); return; }
+  if (!caps().place) { hud.setNotice('to bring something in, take the building tools first (🛠 build, or B)'); return; }
+  if (!editor.active) editor.setActive(true);
+  const hit = editor.pick(e.clientX, e.clientY);
+  let at: [number, number];
+  if (hit && hit.kind === 'ground') at = [hit.lng, hit.lat];
+  else if (hit) { const ll = frame.toLngLat(hit.point.x, hit.point.z); at = [ll.lng, ll.lat]; }
+  else {
+    // dropped on the sky: six metres ahead of whoever is looking
+    const st = player.state();
+    const h = st.headingDeg * Math.PI / 180, q = player.position;
+    const ll = frame.toLngLat(q.x + Math.sin(h) * 6, q.z - Math.cos(h) * 6);
+    at = [ll.lng, ll.lat];
+  }
+  editor.bring(f, f.name, at);
+});
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
@@ -826,7 +867,7 @@ const api = {
   },
   /** the foundation walls the placements imply: the tallest, which floor, and how much wall in all */
   footings: () => footing ? { maxDrop: footing.maxDrop, worst: footing.worst, edges: footing.edges, lengthM: footing.lengthM, solids: footing.solids.length, drawn: !!footing.mesh, byStructure: footing.byStructure } : null,
-  THREE, player, frame, field, terrain, vegetation, structures, today, build, sky, scene, camera, renderer, stick, editor, grid, inspect, magic, studio, looks,
+  THREE, player, frame, field, terrain, vegetation, structures, today, build, sky, scene, camera, renderer, stick, editor, grid, inspect, magic, studio, looks, imports, photo3d,
   get ready() { return ready; },
   get pack() { return pack; },
   get session() { return session; },
