@@ -161,6 +161,35 @@ export function start(port = PORT) {
         const [z, y, x] = air.slice(1).map(Number);
         return send(res, 200, aerialPng(z, x, y), TYPES['.png']);
       }
+      // ---- a stand-in for Cesium ion, Google's 2D tiles and Bing's metadata ----------------------------
+      // Three roads: Google answers (/ion), Google refuses and Bing answers (/ionbing), and the tiles and
+      // metadata each of those points at. The attribution carries a script and a javascript: link on
+      // purpose — the world must show the credit and drop both.
+      const origin = `http://${req.headers.host}`;
+      const ionm = /^\/(ion|ionbing)\/v1\/assets\/(\d+)\/endpoint$/.exec(p);
+      if (ionm) {
+        const [, which, id] = ionm;
+        if (!url.searchParams.get('access_token')) return send(res, 401, JSON.stringify({ code: 'InvalidCredentials' }), TYPES['.json']);
+        const credit = '<span>Google</span> <img src="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27/%3E" alt="Google"><script>window.__pwned=1</script><a href="javascript:window.__pwned=2">terms</a>';
+        if (id === '3830182' && which === 'ion') return send(res, 200, JSON.stringify({ type: 'IMAGERY', externalType: 'GOOGLE_2D_MAPS',
+          options: { url: `${origin}/g2d/`, session: 's1', key: 'k1', tileWidth: 256, tileHeight: 256, imageFormat: 'png' }, attributions: [{ html: credit, collapsible: false }] }), TYPES['.json']);
+        if (id === '2') return send(res, 200, JSON.stringify({ type: 'IMAGERY', externalType: 'BING',
+          options: { url: `${origin}/bing`, key: 'bk', mapStyle: 'Aerial' }, attributions: [{ html: '<span>© Microsoft</span>', collapsible: false }] }), TYPES['.json']);
+        return send(res, 404, JSON.stringify({ code: 'ResourceNotFound' }), TYPES['.json']);
+      }
+      const g2d = /^\/g2d\/v1\/2dtiles\/(\d+)\/(\d+)\/(\d+)$/.exec(p);
+      if (g2d) {
+        if (url.searchParams.get('session') !== 's1' || url.searchParams.get('key') !== 'k1') return send(res, 403, 'no session');
+        const [z, x, y] = g2d.slice(1).map(Number);
+        return send(res, 200, aerialPng(z, x, y), TYPES['.png']);
+      }
+      if (p === '/g2d/tile/v1/viewport') {
+        const need = ['session', 'key', 'zoom', 'north', 'south', 'east', 'west'];
+        if (need.some(k => !url.searchParams.get(k))) return send(res, 400, JSON.stringify({ error: 'missing' }), TYPES['.json']);
+        return send(res, 200, JSON.stringify({ copyright: 'Imagery ©2026 Test Maps' }), TYPES['.json']);
+      }
+      if (p === '/bing/REST/v1/Imagery/Metadata/Aerial') return send(res, 200, JSON.stringify({ brandLogoUri: 'data:image/png;base64,iVBORw0KGgo=',
+        resourceSets: [{ resources: [{ imageUrl: `${origin}/bingtile/{subdomain}/a{quadkey}.jpeg?g=1`, imageUrlSubdomains: ['t0', 't1'], zoomMax: 19 }] }] }), TYPES['.json']);
       if (p === '/') p = '/index.html';
       const file = join(root, 'dist', p);
       const info = await stat(file).catch(() => null);

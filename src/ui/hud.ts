@@ -110,6 +110,7 @@ export class Hud {
         <div class="who" data-el="avatar" hidden></div>
       </div>
       <div class="readout" data-el="readout"></div>
+      <div class="credits" data-el="credits" hidden></div>
       <div class="keys" data-el="keys">W A S D move · <b>Shift</b> run · <b>Space</b> jump · <b>C</b> first person · <b>G</b> fly · <b>B</b> edit · drag or click to look · wheel to zoom out</div>
       <div class="loading" data-el="loading"><div class="spin"></div><span data-el="loadmsg">reading the ground…</span></div>`;
     container.appendChild(this.root);
@@ -197,6 +198,26 @@ export class Hud {
       : kind === 'vrm' ? 'a VRM avatar' : kind === 'gltf' ? 'a glTF avatar' : 'the built-in body';
   }
 
+  /**
+   * The credits for imagery on screen. They arrive as HTML from whoever serves the pixels, so they are
+   * rebuilt here from a strict subset — text, https links, and images (a provider's logo) — and nothing
+   * else: a credit line must never be a way to run code in the world.
+   */
+  setCredits(items: string[]) {
+    const el = this.q('[data-el="credits"]');
+    el.replaceChildren();
+    const seen = new Set<string>();
+    for (const html of items) {
+      if (!html || seen.has(html)) continue;
+      seen.add(html);
+      const span = document.createElement('span');
+      span.className = 'credit';
+      span.appendChild(safeCredit(html));
+      el.appendChild(span);
+    }
+    el.hidden = el.childElementCount === 0;
+  }
+
   /** say who is here: a member, a builder, an admin */
   setRole(role: 'member' | 'builder' | 'admin', canEdit: boolean) {
     const b = this.q('[data-el="role"]');
@@ -247,4 +268,34 @@ export class Hud {
       `<span>heading <b>${s.headingDeg.toFixed(0)}°</b> · ${s.speed.toFixed(1)} m/s</span>` +
       `<span>${tiles} tiles · ${this.fps} fps</span>`;
   }
+}
+
+/** a credit rebuilt from text, https links and images only */
+function safeCredit(html: string): DocumentFragment {
+  const out = document.createDocumentFragment();
+  const doc = new DOMParser().parseFromString(`<div>${html}</div>`, 'text/html');
+  const walk = (from: Node, into: Node) => {
+    for (const c of Array.from(from.childNodes)) {
+      if (c.nodeType === Node.TEXT_NODE) { into.appendChild(document.createTextNode(c.textContent || '')); continue; }
+      if (c.nodeType !== Node.ELEMENT_NODE) continue;
+      const el = c as Element, tag = el.tagName.toLowerCase();
+      if (tag === 'a') {
+        const href = el.getAttribute('href') || '';
+        if (/^https:\/\//i.test(href)) {
+          const a = document.createElement('a');
+          a.href = href; a.target = '_blank'; a.rel = 'noopener noreferrer';
+          walk(el, a); into.appendChild(a);
+        } else walk(el, into);
+      } else if (tag === 'img') {
+        const src = el.getAttribute('src') || '';
+        if (/^(https:\/\/|data:image\/(png|jpeg|svg\+xml)[;,])/i.test(src)) {
+          const i = document.createElement('img');
+          i.src = src; i.alt = el.getAttribute('alt') || ''; i.className = 'credit-logo';
+          into.appendChild(i);
+        }
+      } else if (tag !== 'script' && tag !== 'style') walk(el, into);
+    }
+  };
+  walk(doc.body.firstElementChild || doc.body, out);
+  return out;
 }

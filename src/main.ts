@@ -30,6 +30,7 @@ import { Structures } from './world/structures';
 import { solidsFrom, inRing } from './world/collide';
 import { loadPack, applyEdits, type PackData, type Feature } from './world/pack';
 import { footingsFor, type Footings } from './world/footings';
+import { resolveIonImagery, ION_IMAGERY, type IonImagery, type IonTrace } from './world/ion';
 import { Today, type TodayTiles } from './world/today';
 import { Build } from './world/build';
 import { loadGrain, loadTile } from './world/grain';
@@ -138,6 +139,18 @@ const plantDensity = num('plants', 1, 0, 2);
 const packParam = qs.get('pack');
 const packUrl = packParam === '0' || packParam === 'none' ? null : packParam || PACKS[slug] || null;
 // the ground beyond the property: the global terrarium set, another {z}/{x}/{y} template, or none
+/**
+ * Cesium ion: real imagery for the middle distance and the far ridges, where the pack has none.
+ *   ?ion=0 turns it off; ?ion=<url> asks another server (the tests' stand-in). The token is the
+ *   deploy's VITE_CESIUM_ION_TOKEN — public by design, protected by its scope and its allowed
+ *   domains on ion. A test page may hand one in before load; nothing else can.
+ */
+const ionParam = qs.get('ion');
+const ION_BASE = ionParam && ionParam !== '0' ? ionParam.replace(/\/$/, '') : 'https://api.cesium.com';
+const ionToken: string = ionParam === '0' ? '' : String((window as unknown as { __ionToken?: string }).__ionToken ?? import.meta.env.VITE_CESIUM_ION_TOKEN ?? '');
+let ion: IonImagery | null = null;
+const ionTrace: IonTrace[] = [];
+
 const farParam = qs.get('far');
 const farSource = farParam === '0' || farParam === 'none' ? null : farParam ? { template: farParam, minzoom: 0, maxzoom: 12 } : GLOBAL_TERRAIN;
 
@@ -209,6 +222,18 @@ function rebuildFootings() {
     ground: (x, z) => { const ll = frame.toLngLat(x, z); const h = field.atOr(ll.lng, ll.lat, NaN); return isFinite(h) ? h : null; }
   });
   if (footing.mesh) footGroup.add(footing.mesh);
+}
+
+/** show a resolved source on the distant rings, with its credits — or take both away */
+async function applyIon(src: IonImagery | null) {
+  ion = src;
+  terrain.setDistantImagery(src ? { url: src.url, maxzoom: src.maxzoom } : null);
+  hud.setCredits(src ? src.credits : []);
+  if (!src?.viewportCopyright) return;
+  // Google asks that the copyright for the ground actually in view be shown alongside its logo
+  const views = [terrain.distantView('coarse'), terrain.distantView('far')].filter(Boolean) as { box: [number, number, number, number]; z: number }[];
+  const lines = (await Promise.all(views.map(v => src.viewportCopyright!(v.box, v.z)))).filter(Boolean) as string[];
+  if (ion === src) hud.setCredits([...src.credits, ...lines]);
 }
 
 function refreshWalk() {
@@ -583,6 +608,11 @@ async function boot() {
   terrain.buildCoarse(p.x, p.z, COARSE);
   terrain.buildFine(p.x, p.z, FINE);
   applySun();
+  // the imagery beyond the parcel arrives in the background; the world is walkable without it
+  if (ionToken) void resolveIonImagery(ION_BASE, ionToken, ION_IMAGERY, ionTrace).then(src => {
+    if (src) void applyIon(src);
+    else console.info('[world] no ion imagery', ionTrace);
+  });
 
   hud.setLoading('reading what is proposed here…');
   await structures.load(area.pid);
@@ -729,6 +759,12 @@ async function openStudio() {
 }
 
 const api = {
+  /** the ion imagery on the distant rings: which source, what each asset said, and a way to swap it (tests) */
+  ion: {
+    state: () => ({ token: !!ionToken, base: ION_BASE, kind: ion?.kind ?? null, asset: ion?.asset ?? null, trace: ionTrace.slice(), coarse: { ...terrain.distantState.coarse }, far: { ...terrain.distantState.far } }),
+    resolve: (base: string, token: string, assets: number[] = ION_IMAGERY) => { const t: IonTrace[] = []; return resolveIonImagery(base, token, assets, t).then(src => ({ src, trace: t })); },
+    apply: (src: IonImagery | null) => applyIon(src)
+  },
   /** the foundation walls the placements imply: the tallest, which floor, and how much wall in all */
   footings: () => footing ? { maxDrop: footing.maxDrop, worst: footing.worst, edges: footing.edges, lengthM: footing.lengthM, solids: footing.solids.length, drawn: !!footing.mesh, byStructure: footing.byStructure } : null,
   THREE, player, frame, field, terrain, vegetation, structures, today, build, sky, scene, camera, renderer, stick, editor, grid, inspect, magic, studio, looks,

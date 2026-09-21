@@ -1512,6 +1512,45 @@ const meshopt = await page.evaluate(async () => {
 check('models: a meshopt-compressed model opens — geometry decoded and walk data intact',
   meshopt.ok && meshopt.meshes > 0 && meshopt.triangles > 0 && meshopt.solids > 0, meshopt);
 
+// ---- the imagery beyond the parcel -------------------------------------------------------------------
+// Past the parcel the pack has no photograph, and the middle distance wore colour by slope. Cesium ion
+// hands out real imagery by asset id: Google's satellite first, Bing's aerial if Google is not there.
+// Four things must hold: no token asks for nothing; Google's tiles carry its session and key; Bing
+// is addressed by quadkey when Google refuses; and whoever owns the pixels is credited on screen —
+// with the logo kept and anything that could run code dropped. Then take it away and nothing is left.
+const quadkeyOf = (z, x, y) => { let q = ''; for (let i = z; i > 0; i--) { const m = 1 << (i - 1); q += String((x & m ? 1 : 0) + (y & m ? 2 : 0)); } return q; };
+const ionT = await page.evaluate(async (BASE) => {
+  const w = window.world;
+  const none = await w.ion.resolve(`${BASE}/ion`, '');
+  const g = await w.ion.resolve(`${BASE}/ion`, 'test-token');
+  const b = await w.ion.resolve(`${BASE}/ionbing`, 'test-token');
+  const sample = { g: g.src && g.src.url(15, 5655, 13122), b: b.src && b.src.url(3, 5, 2) };
+  await w.ion.apply(g.src);
+  await w.terrain.distantReady;
+  await new Promise(r => setTimeout(r, 300));
+  const coarse = w.terrain.group.getObjectByName('terrain-coarse');
+  const credits = document.querySelector('[data-el="credits"]');
+  const shown = { hidden: credits.hidden, text: credits.textContent, imgs: credits.querySelectorAll('img').length,
+    scripts: credits.querySelectorAll('script').length, links: [...credits.querySelectorAll('a')].map(a => a.getAttribute('href')), pwned: window.__pwned ?? null };
+  const st = w.ion.state();
+  const draped = { map: !!(coarse && coarse.material.map), vertexColours: coarse && coarse.material.vertexColors, coarse: st.coarse };
+  await w.ion.apply(null);
+  const after = { map: !!(coarse && coarse.material.map), vertexColours: coarse && coarse.material.vertexColors, creditsHidden: credits.hidden, coarse: w.ion.state().coarse };
+  return { none: { src: none.src, trace: none.trace }, g: { kind: g.src && g.src.kind, trace: g.trace }, b: { kind: b.src && b.src.kind, trace: b.trace }, sample, shown, draped, after };
+}, BASE);
+check('ion: with no token nothing is asked for and nothing is drawn',
+  ionT.none.src === null && ionT.none.trace.length === 0, ionT.none);
+check('ion: Google satellite is tried first, and its tiles are addressed by its session and key',
+  ionT.g.kind === 'google2d' && /\/g2d\/v1\/2dtiles\/15\/5655\/13122\?session=s1&key=k1$/.test(ionT.sample.g || ''), { g: ionT.g, url: ionT.sample.g });
+check('ion: when Google is not available the aerial falls back to Bing, addressed by quadkey',
+  ionT.b.kind === 'bing' && ionT.b.trace[0] && ionT.b.trace[0].ok === false && (ionT.sample.b || '').includes(`/t1/a${quadkeyOf(3, 5, 2)}.jpeg`), { b: ionT.b, url: ionT.sample.b });
+check('ion: the middle distance wears the satellite, credited on screen — logo kept, script and javascript: link dropped',
+  ionT.draped.map && ionT.draped.vertexColours === false && ionT.draped.coarse.loaded > 0 && !ionT.shown.hidden && /Google/.test(ionT.shown.text)
+    && /Test Maps/.test(ionT.shown.text) && ionT.shown.imgs >= 1 && ionT.shown.scripts === 0 && !ionT.shown.links.some(h => /^javascript/i.test(h || '')) && ionT.shown.pwned === null,
+  { draped: ionT.draped, shown: ionT.shown });
+check('ion: taken away, the rings go back to their slope colours and the credits go with them',
+  !ionT.after.map && ionT.after.vertexColours === true && ionT.after.creditsHidden && !ionT.after.coarse.active, ionT.after);
+
 // ---- nothing threw ------------------------------------------------------------------------------
 const real = errs.filter(e => !/WebGL|GL_INVALID|swiftshader|GPU stall|Failed to load resource/i.test(e));
 check('no page errors', real.length === 0, real.slice(0, 4));
