@@ -11,7 +11,7 @@
 //   not ground, so there the leaf-litter tile replaces the photograph outright — and the rest is
 //   dirt. The grain fades out between 25 and 90 m, where the aerial takes over on its own.
 //
-//   This is a shader patch on the ordinary Lambert material of the fine ring: two lines in the
+//   This is a shader patch on the ordinary material of the fine ring: two lines in the
 //   vertex shader for a world-space UV, and one block after the map is sampled. Nothing else about
 //   the terrain changes.
 
@@ -88,7 +88,7 @@ export function loadTile(url: string | undefined): Promise<THREE.Texture | null>
  *   Returns the uniforms so the caller can change the fade distances. The material must have a
  *   map (the aerial); without one the patch is a no-op, because there is nothing to add grain to.
  */
-export function applyGrain(mat: THREE.MeshLambertMaterial, tiles: GrainTiles): Record<string, THREE.IUniform> {
+export function applyGrain(mat: THREE.MeshLambertMaterial | THREE.MeshStandardMaterial, tiles: GrainTiles): Record<string, THREE.IUniform> {
   const uniforms: Record<string, THREE.IUniform> = {
     uStraw: { value: tiles.straw }, uDirt: { value: tiles.dirt }, uGravel: { value: tiles.gravel }, uLitter: { value: tiles.litter },
     uMetres: { value: new THREE.Vector4(tiles.metres.straw, tiles.metres.dirt, tiles.metres.gravel, tiles.metres.litter) },

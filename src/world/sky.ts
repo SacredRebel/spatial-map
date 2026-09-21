@@ -41,7 +41,12 @@ void main() {
 const FRAG = /* glsl */`
 uniform vec3 uZenith; uniform vec3 uAway; uniform vec3 uToward; uniform vec3 uGround;
 uniform vec3 uSunDir; uniform vec3 uGlowColor; uniform float uGlow; uniform vec3 uSunColor; uniform float uDisc;
+uniform float uCloud; uniform float uTime; uniform vec3 uCloudLit; uniform vec3 uCloudShade;
 varying vec3 vDir;
+float h21(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+float vn(vec2 p) { vec2 i = floor(p), f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(h21(i), h21(i + vec2(1, 0)), u.x), mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), u.x), u.y); }
+float fbm(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 5; i++) { s += a * vn(p); p = p * 2.03 + vec2(17.1, 9.2); a *= 0.5; } return s; }
 void main() {
   vec3 d = normalize(vDir);
   vec3 s = normalize(uSunDir);
@@ -53,6 +58,19 @@ void main() {
   float c = max(dot(d, s), 0.0);
   sky += uGlowColor * uGlow * (0.5 * pow(c, 32.0) + 0.5 * pow(c, 400.0));  // forward scatter, tight
   sky += uSunColor * uDisc * smoothstep(0.99992, 0.99997, c);             // the disc, about a degree across
+  // fair-weather cumulus over the valley: a layer projected onto the dome, drifting with the wind,
+  // bright where the sun lights it and grey where it does not, thinning out towards the horizon
+  if (uCloud > 0.0 && h > 0.0) {
+    vec2 cp = d.xz / (h + 0.12) * 1.6 + vec2(uTime * 0.004, uTime * 0.0015);
+    float n = fbm(cp) * 0.75 + fbm(cp * 3.1 + 7.0) * 0.25;
+    float cov = smoothstep(1.0 - uCloud, 1.0 - uCloud + 0.22, n);
+    float thick = smoothstep(1.0 - uCloud, 1.0, n);
+    float lit = clamp(0.55 + 0.45 * dot(normalize(vec3(d.x, 0.0, d.z) + 1e-4), normalize(vec3(s.x, 0.0, s.z) + 1e-4)), 0.0, 1.0);
+    vec3 cloud = mix(uCloudShade, uCloudLit, clamp(lit * (1.0 - 0.55 * thick) + 0.25, 0.0, 1.0));
+    cloud += uGlowColor * uGlow * 0.6 * pow(c, 12.0);
+    float fadeH = smoothstep(0.02, 0.22, h);
+    sky = mix(sky, cloud, cov * fadeH * 0.92);
+  }
   vec3 below = mix(horizon * 0.85, uGround, clamp(-h * 3.0, 0.0, 1.0));
   gl_FragColor = vec4(h < 0.0 ? below : sky, 1.0);
   #include <tonemapping_fragment>
@@ -118,7 +136,11 @@ export class Sky {
         uGlowColor: { value: KEYS.day.glow.clone() },
         uGlow: { value: KEYS.day.glowK },
         uSunColor: { value: new THREE.Color(1, 1, 1) },
-        uDisc: { value: 20 }
+        uDisc: { value: 20 },
+        uCloud: { value: 0 },
+        uTime: { value: 0 },
+        uCloudLit: { value: new THREE.Color(1.6, 1.55, 1.45) },
+        uCloudShade: { value: new THREE.Color(0.55, 0.6, 0.7) }
       }
     });
     this.mat.toneMapped = true;
@@ -175,6 +197,10 @@ export class Sky {
     this.sun.color.setRGB(t[0] / peak, t[1] / peak, t[2] / peak, THREE.LinearSRGBColorSpace);
     (u.uSunColor.value as THREE.Color).copy(this.sun.color);
     u.uDisc.value = 20 * THREE.MathUtils.smoothstep(p.altitude, -1, 1);
+    // cloud light is the sun's colour, dimmed with the day; the shade is the sky's own blue-grey
+    const dayK = THREE.MathUtils.smoothstep(p.altitude, -6, 20);
+    (u.uCloudLit.value as THREE.Color).copy(this.sun.color).multiplyScalar(0.25 + 1.4 * dayK);
+    (u.uCloudShade.value as THREE.Color).copy(mix3('away')).multiplyScalar(0.55 + 0.25 * dayK);
 
     // the sky, asked twice: straight up, and along the horizon square to the sun
     const side = new THREE.Vector3(-v.z, 0, v.x);
@@ -199,6 +225,12 @@ export class Sky {
     this.exposure = 1 + 0.9 * (1 - THREE.MathUtils.smoothstep(p.altitude, -2, 30));
     return { pos: p, horizon: this.horizon, zenith: this.zenith };
   }
+
+  /** how much of the sky is cloud, 0..0.7 — a clear Ojai afternoon is a little */
+  set clouds(v: number) { this.mat.uniforms.uCloud.value = Math.max(0, Math.min(0.7, v)); }
+  get clouds(): number { return this.mat.uniforms.uCloud.value as number; }
+  /** the clouds drift; the loop calls this with the seconds since the world began */
+  tick(seconds: number) { this.mat.uniforms.uTime.value = seconds; }
 
   addTo(scene: THREE.Scene) {
     scene.add(this.mesh, this.sun, this.sun.target, this.ambient);

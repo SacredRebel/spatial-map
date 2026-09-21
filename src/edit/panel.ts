@@ -5,7 +5,8 @@
 
 import type { Editor, Pick, Tool } from './editor';
 import type { Caps, Role } from '../world/roles';
-import { MATERIAL_NAMES, ROOF_FORMS, type Opening } from '../world/build';
+import { MATERIAL_NAMES, ROOF_FORMS, STRUCTURES, INFILLS, INSULATIONS, ROOF_FINISHES, type Opening } from '../world/build';
+import { ORGANIC_FORMS, type OrganicSpec, type Quantities } from '../world/organic';
 
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
 const FT = 0.3048;
@@ -24,8 +25,51 @@ const TOOLS: { id: Tool; key: string; label: string; hint: string; needs?: keyof
   { id: 'wall', key: 'L', label: '▬ wall', hint: 'click along the wall on the grid · click the start again to close a room · Enter to finish', needs: 'place', group: 'build' },
   { id: 'floor', key: 'F', label: '▱ floor', hint: 'click the corners of the floor · Enter to lay it', needs: 'place', group: 'build' },
   { id: 'roof', key: 'R', label: '⌂ roof', hint: 'click the corners the roof covers · Enter to raise it', needs: 'place', group: 'build' },
-  { id: 'opening', key: 'O', label: '▯ door / window', hint: 'click a wall where the opening goes', needs: 'place', group: 'build' }
+  { id: 'opening', key: 'O', label: '▯ door / window', hint: 'click a wall where the opening goes', needs: 'place', group: 'build' },
+  { id: 'organic', key: 'K', label: '🌿 organic', hint: 'click round the ground it may use · Enter grows a building that fits inside, eave and all', needs: 'place', group: 'build' },
+  { id: 'mark', key: 'M', label: '✦ mark for AI', hint: 'press and draw round ground or walls (or click corners, Enter) · then tell the agent what to do there', group: 'build' }
 ];
+
+const opts = (list: readonly string[], chosen: string) => list.map(m => `<option value="${m}" ${m === chosen ? 'selected' : ''}>${m.replace('_', ' ')}</option>`).join('');
+const compass = (deg: number) => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(((deg % 360) + 360) % 360 / 45) % 8];
+
+/** the biomimetic controls: every number that shapes an organic building, as sliders */
+function organicControls(sp: OrganicSpec, attr: string, dis = ''): string {
+  const range = (k: keyof OrganicSpec, label: string, lo: number, hi: number, step: number, unit = '', show?: (v: number) => string) =>
+    `<label class="ep-range">${label} <input ${attr}="${k}" type="range" min="${lo}" max="${hi}" step="${step}" value="${sp[k] as number}" ${dis}><output>${show ? show(sp[k] as number) : `${sp[k]}${unit}`}</output></label>`;
+  return `<div class="ep-organic">
+    <label class="ep-inline">form <select ${attr}="form" ${dis}>${opts(ORGANIC_FORMS, sp.form)}</select></label>
+    ${sp.form === 'lobed' ? range('lobes', 'lobes', 2, 12, 1) : ''}
+    ${sp.form === 'lobed' || sp.form === 'shell' ? range('depth', sp.form === 'shell' ? 'curl' : 'lobe depth', 0, 0.6, 0.05) : ''}
+    ${range('turn', 'turn', -180, 180, 5, '°')}
+    ${range('height', 'wall height', 2.4, 7, 0.1, ' m')}
+    ${range('rise', 'roof rise', 0.4, 6, 0.1, ' m')}
+    ${range('overhang', 'eave', 0, 2.5, 0.1, ' m')}
+    ${range('thick', 'wall thickness', 0.15, 0.9, 0.05, ' m')}
+    ${range('glazing', 'glass', 0, 1, 0.05, '', v => `${Math.round(v * 100)}%`)}
+    ${range('facing', 'glass faces', 0, 355, 5, '', v => `${v}° ${compass(v)}`)}
+    ${sp.form === 'shell' ? '' : range('door', 'door at', 0, 355, 5, '', v => `${v}° ${compass(v)}`)}
+    <label class="ep-inline">frame <select ${attr}="structure" ${dis}>${opts(STRUCTURES, sp.structure)}</select></label>
+    <label class="ep-inline">walls <select ${attr}="infill" ${dis}>${opts(INFILLS, sp.infill)}</select></label>
+    <label class="ep-inline">insulation <select ${attr}="insulation" ${dis}>${opts(INSULATIONS, sp.insulation)}</select></label>
+    <label class="ep-inline">roof <select ${attr}="roof" ${dis}>${opts(ROOF_FINISHES, sp.roof)}</select></label>
+    ${sp.roof === 'solar' ? range('solar', 'panels', 0, 1, 0.05, '', v => `${Math.round(v * 100)}% of the sunny side`) : ''}
+    <label class="ep-inline">floor <select ${attr}="floor" ${dis}>${opts(['earth', 'stone', 'wood', 'concrete', 'timber'], sp.floor)}</select></label>
+    <label class="ep-check"><input ${attr}="pad" type="checkbox" ${sp.pad ? 'checked' : ''} ${dis}> level a pad under it first</label>
+  </div>`;
+}
+
+function quantities(q: Quantities | null): string {
+  if (!q) return '';
+  return `<div class="ep-qty"><b>what it takes</b> <small>(rough, from the model)</small>
+    <div>floor ${q.floorM2} m² · ${q.floorSqft.toLocaleString()} sq ft</div>
+    <div>walls ${q.wallLengthM} m round × ${q.wallHeightM} m · ${q.wallNetM2} m² net · infill ${q.infillM3} m³</div>
+    <div>${q.doors} door${q.doors === 1 ? '' : 's'} · ${q.windows} window${q.windows === 1 ? '' : 's'} · ${q.glazingM2} m² of glass</div>
+    <div>roof ${q.roofSurfaceM2} m² (covers ${q.roofPlanM2} m²)${q.insulationM3 ? ` · insulation ${q.insulationM3} m³` : ''}</div>
+    ${q.frameKg ? `<div>frame ≈ ${q.frameKg.toLocaleString()} kg</div>` : ''}
+    ${q.panels ? `<div>solar ${q.panels} panels · ${q.solarKwp} kWp · ≈ ${q.solarKwhYear.toLocaleString()} kWh a year</div>` : ''}
+  </div>`;
+}
 
 const ZONE_KINDS = ['zone', 'garden', 'orchard', 'pasture', 'site', 'camp', 'water', 'keep', 'forest'];
 const materialOptions = (chosen: string) => MATERIAL_NAMES.map(m => `<option value="${m}" ${m === chosen ? 'selected' : ''}>${m}</option>`).join('');
@@ -65,7 +109,7 @@ export class Panel {
       <div class="ep-tools">${tools.filter(t => !t.group).map(button).join('')}</div>
       ${building.length ? `<div class="ep-tools ep-build"><span class="ep-group">build</span>${building.map(button).join('')}<button class="ep-tool" data-act="room" title="a floor, a closed wall with a door, and a roof, put down in one go where you stand">⌂ room…</button></div>` : ''}
       <div class="ep-hint">${esc(TOOLS.find(t => t.id === e.tool)?.hint ?? '')}</div>
-      ${e.tool === 'block' ? this.blockForm() : e.tool === 'terrain' ? this.shapeForm() : e.tool === 'zone' ? this.zoneForm() : e.tool === 'wall' ? this.wallForm() : e.tool === 'floor' ? this.floorForm() : e.tool === 'roof' ? this.roofForm() : e.tool === 'opening' ? this.openingForm() : ''}
+      ${e.tool === 'block' ? this.blockForm() : e.tool === 'terrain' ? this.shapeForm() : e.tool === 'zone' ? this.zoneForm() : e.tool === 'wall' ? this.wallForm() : e.tool === 'floor' ? this.floorForm() : e.tool === 'roof' ? this.roofForm() : e.tool === 'opening' ? this.openingForm() : e.tool === 'organic' ? this.organicForm() : e.tool === 'mark' ? this.markForm() : ''}
       ${busy}
       ${this.selection(e.selection)}
       <div class="ep-list">${this.list()}</div>
@@ -114,6 +158,27 @@ export class Panel {
       if (input.type === 'number' && !isFinite(v as number)) return;
       e.updateBuild(s.id, { [k]: v });
     }));
+    // the organic tool's spec for the next building, and the sliders on a selected one (which grow it again)
+    const readOrg = (i: HTMLInputElement | HTMLSelectElement): [keyof OrganicSpec, unknown] => {
+      const input = i as HTMLInputElement;
+      const k = (i.dataset.org ?? i.dataset.orgNext) as keyof OrganicSpec;
+      return [k, input.type === 'checkbox' ? input.checked : input.type === 'range' || input.type === 'number' ? Number(input.value) : input.value];
+    };
+    this.root.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-org-next]').forEach(i => {
+      i.addEventListener('input', () => { const o = i.parentElement?.querySelector('output'); if (o && i instanceof HTMLInputElement && i.type === 'range') o.textContent = i.value; });
+      i.addEventListener('change', () => { const [k, v] = readOrg(i); (e.organic as unknown as Record<string, unknown>)[k] = v; this.render(); });
+    });
+    this.root.querySelector<HTMLInputElement>('[data-org-name]')?.addEventListener('change', ev => { e.organicName = (ev.target as HTMLInputElement).value.trim(); });
+    this.root.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-org]').forEach(i => {
+      i.addEventListener('input', () => { const o = i.parentElement?.querySelector('output'); if (o && i instanceof HTMLInputElement && i.type === 'range') o.textContent = i.value; });
+      i.addEventListener('change', () => {
+        const sel = e.selection;
+        const name = sel?.kind === 'build' ? String(sel.feature.properties.structure ?? '') : '';
+        if (!name) return;
+        const [k, v] = readOrg(i);
+        e.regenerateOrganic(name, { [k]: v } as Partial<OrganicSpec>);
+      });
+    });
     this.root.querySelectorAll<HTMLElement>('[data-opening]').forEach(b => b.addEventListener('click', () => {
       const s = e.selection;
       if (s?.kind === 'build') e.removeOpening(s.id, Number(b.dataset.opening));
@@ -201,6 +266,24 @@ export class Panel {
     </div>`;
   }
 
+  private organicForm(): string {
+    const e = this.editor;
+    return `<div class="ep-form">
+      <label>name <input data-org-name value="${esc(e.organicName)}" placeholder="the oak leaf house"></label>
+      ${organicControls(e.organic, 'data-org-next')}
+      ${e.lastOrganicWhy ? `<div class="ep-save bad">${esc(e.lastOrganicWhy)}</div>` : ''}
+      <small>the whole building, eave included, stays inside the line you draw · select any part afterwards to reshape it with these same sliders</small>
+    </div>`;
+  }
+
+  private markForm(): string {
+    const m = this.editor.mark;
+    return `<div class="ep-form">
+      ${m ? `<div>marked ${Math.round(m.areaM2)} m² · ${m.selected.length} part${m.selected.length === 1 ? '' : 's'} inside <button class="btn" data-act="clear-mark">clear</button> <button class="btn gold" data-act="talk-mark">✦ talk</button></div>` : '<div class="muted">nothing marked yet</div>'}
+      <small>mark empty ground and ask for a building, or mark walls and ask to change them</small>
+    </div>`;
+  }
+
   /** the card for a wall, a floor or a roof: its numbers, changed in place */
   private partCard(p: Pick & { kind: 'build' }): string {
     const f = p.feature, pr = f.properties;
@@ -230,6 +313,8 @@ export class Panel {
         <label class="ep-inline">overhang <input data-part="overhang_m" type="number" step="0.1" min="0" max="3" value="${Number(pr.overhang_m ?? 0.5)}" ${dis}> m</label>
         <label class="ep-inline">material <select data-part="material" ${dis}>${materialOptions(String(pr.material || 'tile'))}</select></label>`;
     }
+    const org = pr.structure ? this.editor.organicOf(String(pr.structure)) : null;
+    if (org) body += `<div class="ep-orghead">🌿 <b>${esc(pr.structure)}</b> — organic · reshape it:</div>${organicControls(org.spec, 'data-org', dis)}${quantities(this.editor.organicQuantities(String(pr.structure)))}${(() => { const n = this.editor.treesInside(String(pr.structure)); return n ? `<div class="ep-save bad">⚠ ${n} recorded tree${n === 1 ? '' : 's'} stand${n === 1 ? 's' : ''} inside this footprint. Coast live oaks are protected in Ventura County — move the building, or mark a tree gone only if it really can go.</div>` : ''; })()}`;
     const structure = pr.structure ? this.editor.buildParts(String(pr.structure)).length : 0;
     const acts = can ? `<div class="ep-row"><button class="btn" data-act="rot-" title="turn 15° left ([)">↺ 15°</button><button class="btn" data-act="rot+" title="turn 15° right (])">↻ 15°</button><button class="btn" data-act="remove">✕ take down</button>${structure > 1 ? `<button class="btn" data-act="remove-structure" title="every part of ${esc(pr.structure)}">✕ all ${structure} parts</button>` : ''}</div>
       <div class="muted">drag it across the ground to move it · it snaps to the half metre</div>` : '';
@@ -332,6 +417,8 @@ export class Panel {
       case 'rot+': if (s?.kind === 'structure') e.rotateStructure(s.id, 15); else if (s?.kind === 'build') e.rotateBuild(s.id, 15); break;
       case 'remove-structure': if (s?.kind === 'build' && s.feature.properties.structure) e.removeStructureParts(String(s.feature.properties.structure)); break;
       case 'room': this.roomPrompt(); break;
+      case 'clear-mark': e.clearMark(); break;
+      case 'talk-mark': e.openMagic('mark'); break;
       case 'up': if (s?.kind === 'structure') e.raiseStructure(s.id, 0.25); break;
       case 'down': if (s?.kind === 'structure') e.raiseStructure(s.id, -0.25); break;
       case 'save': {

@@ -20,23 +20,30 @@ import type { Frame } from './geo';
 import type { HeightField } from './heightfield';
 import type { Solid } from './collide';
 import type { Feature, PackData } from './pack';
+import { SURFACES, surfaceMaterial } from './materials';
+import { shell, solarSpots } from './shell';
 
 export interface Opening { kind: 'door' | 'window'; at_m: number; width_m: number; sill_m: number; head_m: number }
 /** something you can stand on: a floor, a deck */
 export interface Platform { id: string; ring: { x: number; z: number }[]; top: number }
 
-export interface BuildCounts { walls: number; floors: number; roofs: number; openings: number }
+export interface BuildCounts { walls: number; floors: number; roofs: number; openings: number; panels: number }
 
-/** the palette, by material name: what a wall or a roof looks like until a real texture arrives */
-export const MATERIALS: Record<string, { colour: string; glass?: boolean }> = {
-  plaster: { colour: '#e8e2d4' }, lime: { colour: '#f1ece1' }, wood: { colour: '#a67c52' }, timber: { colour: '#8b6a45' },
-  stone: { colour: '#9a948a' }, earth: { colour: '#b08a63' }, adobe: { colour: '#c9a27a' }, concrete: { colour: '#b9b5ae' },
-  glass: { colour: '#bcd8e6', glass: true }, metal: { colour: '#9aa0a3' }, tile: { colour: '#a3563b' }, thatch: { colour: '#c2a35a' },
-  shingle: { colour: '#6b625a' }, living: { colour: '#7da65a' }
-};
+/** the palette, by material name: a base colour for lists, and whether it is glass — the surfaces themselves live in materials.ts */
+export const MATERIALS: Record<string, { colour: string; glass?: boolean }> = Object.fromEntries(
+  Object.entries(SURFACES).filter(([, v]) => v.use.some(u => u !== 'ground')).map(([k, v]) => [k, v.glass ? { colour: v.colour, glass: true } : { colour: v.colour }])
+);
 export const MATERIAL_NAMES = Object.keys(MATERIALS);
-export const ROOF_FORMS = ['flat', 'shed', 'gable', 'hip', 'vault'] as const;
+/** shell: the organic roof, a cushion over any outline (world/shell.ts) */
+export const ROOF_FORMS = ['flat', 'shed', 'gable', 'hip', 'vault', 'shell'] as const;
 export type RoofForm = typeof ROOF_FORMS[number];
+/** what a roof is finished in, when the finish is more than its material: solar is panels on a metal roof */
+export const ROOF_FINISHES = ['solar', 'living', 'metal', 'thatch', 'tile', 'shingle'] as const;
+/** what carries a building, what fills its walls, what keeps it warm: shown in the model, counted in the quantities */
+export const STRUCTURES = ['steel', 'timber', 'bamboo', 'none'] as const;
+export const INFILLS = ['cob', 'hempcrete', 'strawbale', 'rammed_earth', 'adobe', 'stone', 'plaster', 'wood', 'timber', 'glass'] as const;
+export const INSULATIONS = ['hemp', 'wool', 'cork', 'strawbale', 'none'] as const;
+export interface Assembly { structure?: string; infill?: string; insulation?: string; roof_structure?: string }
 
 const STEP = 0.5;          // a curve is sampled this often
 type XZ = { x: number; z: number };
@@ -70,9 +77,14 @@ export function wallLine(coords: [number, number][], smooth: boolean, frame: Fra
     if (!pts.length || Math.hypot(w.x - pts[pts.length - 1].x, w.z - pts[pts.length - 1].z) > 1e-3) pts.push({ x: w.x, z: w.z });
   }
   if (!smooth || pts.length < 3) return pts;
-  const curve = new THREE.CatmullRomCurve3(pts.map(p => new THREE.Vector3(p.x, 0, p.z)), false, 'centripetal', 0.5);
+  // a wall that comes back to its start is a closed ring: the curve runs round without a kink at the join
+  const closed = pts.length > 3 && Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].z - pts[pts.length - 1].z) < 1e-3;
+  const ctrl = closed ? pts.slice(0, -1) : pts;
+  const curve = new THREE.CatmullRomCurve3(ctrl.map(p => new THREE.Vector3(p.x, 0, p.z)), closed, 'centripetal', 0.5);
   const n = Math.max(8, Math.ceil(curve.getLength() / STEP));
-  return curve.getSpacedPoints(n).map(p => ({ x: p.x, z: p.z }));
+  const out = curve.getSpacedPoints(n).map(p => ({ x: p.x, z: p.z }));
+  if (closed) out[out.length - 1] = { ...out[0] };
+  return out;
 }
 
 /** a polyline you can ask for the point and the outward direction at any distance along it */
@@ -230,7 +242,7 @@ export class Build {
   group = new THREE.Group();
   solids: Solid[] = [];
   platforms: Platform[] = [];
-  counts: BuildCounts = { walls: 0, floors: 0, roofs: 0, openings: 0 };
+  counts: BuildCounts = { walls: 0, floors: 0, roofs: 0, openings: 0, panels: 0 };
   private disposables: (THREE.BufferGeometry | THREE.Material)[] = [];
 
   constructor(private frame: Frame, private field: HeightField) {
@@ -249,12 +261,9 @@ export class Build {
     }
   }
 
-  private material(name: unknown, fallback = 'plaster'): THREE.MeshLambertMaterial {
-    const m = MATERIALS[String(name)] ?? MATERIALS[fallback];
-    // a little self-light, so a room with its roof on is dim rather than black until interiors are lit properly
-    const mat = new THREE.MeshLambertMaterial({ color: m.colour, emissive: m.colour, emissiveIntensity: 0.22, side: THREE.DoubleSide, transparent: !!m.glass, opacity: m.glass ? 0.38 : 1, depthWrite: !m.glass });
-    this.disposables.push(mat);
-    return mat;
+  /** the shared surface for a material name — shared, so it is never disposed here */
+  private material(name: unknown, fallback = 'plaster'): THREE.Material {
+    return surfaceMaterial(String(name ?? ''), fallback);
   }
 
   /** the lowest ground along a set of lng/lat points: where a footing goes */
@@ -288,6 +297,7 @@ export class Build {
     mesh.name = `build:${id}`;
     this.group.add(mesh);
     this.disposables.push(geo);
+    if (p.assembly && typeof p.assembly === 'object') this.wallFrame(mesh, along, base, height, thick, openings, p.assembly as Assembly);
     this.solids.push(...wallSolids(id, along, base, height, thick, openings));
     this.counts.walls++;
     this.counts.openings += openings.length;
@@ -334,7 +344,14 @@ export class Build {
     const rise = form === 'flat' ? 0 : form === 'shed' ? Math.tan(pitch) * (v1 - v0) : Math.tan(pitch) * hw;
     const g = new THREE.Group();
     g.name = `build:${id}`;
-    const mat = this.material(p.material, form === 'vault' ? 'metal' : 'tile');
+    const finish = String(p.finish ?? '');
+    const mat = this.material(finish === 'solar' ? 'metal' : (ROOF_FINISHES as readonly string[]).includes(finish) ? finish : p.material, form === 'vault' || form === 'shell' ? 'metal' : 'tile');
+    if (form === 'shell') {
+      this.shellRoof(g, f, ring, eaves, over, mat);
+      this.group.add(g);
+      this.counts.roofs++;
+      return;
+    }
     if (form === 'hip') {
       // four planes from the eaves to a ridge shortened by the half width at each end (a pyramid on a square)
       const A = [u0, v0], B = [u1, v0], C = [u1, v1], D = [u0, v1];
@@ -400,12 +417,119 @@ export class Build {
     this.counts.roofs++;
   }
 
+  /**
+   * The organic roof: a shell over whatever outline it was given, finished in its material — and,
+   * when the finish is solar, carrying panels on the part of it that faces the sun, and when it
+   * says what holds it up, showing that underneath as ribs.
+   */
+  private shellRoof(g: THREE.Group, f: Feature, ring: XZ[], eaves: number, over: number, mat: THREE.Material) {
+    const p = f.properties;
+    const rise = Math.min(12, Math.max(0.2, Number(p.rise_m ?? 2.2)));
+    const sh = shell(ring, { eaves, rise, overhang: over, thick: 0.22 });
+    const mesh = new THREE.Mesh(sh.geometry, mat);
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    g.add(mesh);
+    this.disposables.push(sh.geometry);
+    if (String(p.finish) === 'solar') {
+      const spots = solarSpots(sh, { ratio: Number(p.solar_ratio ?? 0.6), facingDeg: Number(p.solar_facing_deg ?? 180) });
+      if (spots.length) {
+        const panel = new THREE.BoxGeometry(1.02, 0.045, 1.72);
+        // the panel texture is one panel: its UVs span the box's top face exactly once
+        const uv = panel.getAttribute('uv') as THREE.BufferAttribute;
+        for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * 1.7, uv.getY(i) * 1.7);
+        const im = new THREE.InstancedMesh(panel, surfaceMaterial('solar'), spots.length);
+        const up = new THREE.Vector3(0, 1, 0), q = new THREE.Quaternion(), m = new THREE.Matrix4(), one = new THREE.Vector3(1, 1, 1);
+        spots.forEach((sp, i) => {
+          q.setFromUnitVectors(up, sp.n);
+          m.compose(new THREE.Vector3(sp.x, sp.y + 0.09, sp.z), q, one);
+          im.setMatrixAt(i, m);
+        });
+        im.instanceMatrix.needsUpdate = true;
+        im.castShadow = true; im.receiveShadow = true;
+        im.name = 'solar';
+        g.add(im);
+        this.disposables.push(panel);
+        this.counts.panels += spots.length;
+      }
+    }
+    const a = (p.assembly ?? {}) as Assembly;
+    const rs = String(a.roof_structure ?? a.structure ?? '');
+    if (rs === 'steel' || rs === 'timber' || rs === 'bamboo') {
+      // ribs: from the wall line up to the crown, under the shell, every metre and a half of wall
+      const every = Math.max(1, Math.round(1.6 / 0.5));
+      const size = rs === 'steel' ? 0.09 : rs === 'timber' ? 0.16 : 0.1;
+      const boxes: THREE.Matrix4[] = [];
+      for (let i = 0; i < sh.wall.length; i += every) {
+        const w = sh.wall[i];
+        const steps = 10;
+        let prev: THREE.Vector3 | null = null;
+        for (let k = 0; k <= steps; k++) {
+          const t = k / steps;
+          const x = w.x + (sh.pole.x - w.x) * t, z = w.z + (sh.pole.z - w.z) * t;
+          const h = sh.heightAt(x, z);
+          if (h == null) continue;
+          const cur = new THREE.Vector3(x, h - 0.22 - size / 2 - 0.02, z);
+          if (prev) {
+            const len = prev.distanceTo(cur);
+            const mid = prev.clone().add(cur).multiplyScalar(0.5);
+            const dir = cur.clone().sub(prev).normalize();
+            const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir);
+            boxes.push(new THREE.Matrix4().compose(mid, q, new THREE.Vector3(size, size * 1.6, len + 0.02)));
+          }
+          prev = cur;
+        }
+      }
+      this.instanceBoxes(g, boxes, rs === 'steel' ? 'steel' : rs === 'timber' ? 'timber' : 'bamboo', 'ribs');
+    }
+  }
+
+  /** many unit boxes, one draw call */
+  private instanceBoxes(g: THREE.Object3D, boxes: THREE.Matrix4[], material: string, name: string) {
+    if (!boxes.length) return;
+    const geo = new THREE.BoxGeometry(1, 1, 1);
+    const im = new THREE.InstancedMesh(geo, surfaceMaterial(material), boxes.length);
+    boxes.forEach((m, i) => im.setMatrixAt(i, m));
+    im.instanceMatrix.needsUpdate = true;
+    im.castShadow = true; im.receiveShadow = true;
+    im.name = name;
+    g.add(im);
+    this.disposables.push(geo);
+  }
+
+  /**
+   * A wall's frame, where it says it has one: posts on the inside face of a closed wall (a room's),
+   * or down the middle of an open one, every 1.2 m, clear of the doors and windows.
+   */
+  private wallFrame(parent: THREE.Object3D, along: Along, base: number, height: number, thick: number, openings: Opening[], a: Assembly) {
+    const st = String(a.structure ?? '');
+    if (st !== 'steel' && st !== 'timber' && st !== 'bamboo') return;
+    const pts = along.pts;
+    const closed = pts.length > 3 && Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].z - pts[pts.length - 1].z) < 1e-3;
+    // which side is in: toward the middle of the ring
+    let cx = 0, cz = 0;
+    for (const q of pts) { cx += q.x / pts.length; cz += q.z / pts.length; }
+    const size = st === 'steel' ? 0.1 : st === 'timber' ? 0.18 : 0.11;
+    const boxes: THREE.Matrix4[] = [];
+    const q0 = new THREE.Quaternion();
+    for (let s = 0.4; s < along.total - 0.3; s += 1.2) {
+      if (openings.some(o => Math.abs(o.at_m - s) < o.width_m / 2 + size)) continue;
+      const p = along.at(s);
+      let off = 0;
+      if (closed) {
+        const inward = (cx - p.x) * p.nx + (cz - p.z) * p.nz > 0 ? 1 : -1;
+        off = inward * (thick / 2 + size / 2 + 0.01);
+      }
+      boxes.push(new THREE.Matrix4().compose(new THREE.Vector3(p.x + p.nx * off, base + height / 2, p.z + p.nz * off), q0, new THREE.Vector3(size, height, size)));
+    }
+    this.instanceBoxes(parent, boxes, st === 'steel' ? 'steel' : st === 'timber' ? 'timber' : 'bamboo', 'frame');
+  }
+
   dispose() {
     for (const o of this.group.children.slice()) this.group.remove(o);
     for (const d of this.disposables) d.dispose();
     this.disposables = [];
     this.solids = [];
     this.platforms = [];
-    this.counts = { walls: 0, floors: 0, roofs: 0, openings: 0 };
+    this.counts = { walls: 0, floors: 0, roofs: 0, openings: 0, panels: 0 };
   }
 }

@@ -54,6 +54,10 @@ const AO_NEAR = 0.25;
 const AO_FAR = 400;
 /** how dark the occlusion is allowed to get; above ~1.2 the hillside turns to soot */
 const AO_SCALE = 1.05;
+/** how much of the pre-filtered sky lights the world (see lightFromSky) */
+const ENV_INTENSITY = 0.42;
+/** the finish on the displayed picture — gentle, so the calibrated sky and ground keep their colour */
+const GRADE = { saturation: 1.07, contrast: 1.04, vignette: 0.32 };
 /** below this, for this many seconds in a row, the chain is costing more than it returns */
 const SLOW_FPS = 26;
 const SLOW_FOR = 2.5;
@@ -160,10 +164,39 @@ export class Looks {
         c.addPass(g);
         this.gtao = g;
       }
+      // a little bloom where light is really bright — the sun on glass, a white wall at noon — in
+      // linear light, before the tone map, so only what is truly over-bright glows
+      if (q === 'full') {
+        const { UnrealBloomPass } = await import('three/examples/jsm/postprocessing/UnrealBloomPass.js');
+        c.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.16, 0.45, 0.93));
+      }
       // the composer's targets are linear: the tone map and the colour space belong at the end of
       // the chain, not baked into every material, or the occlusion would darken an already-graded
       // picture and the shadows would go to mud
       c.addPass(new OutputPass());
+      // the finish, on the displayed picture: a touch of contrast and colour, a soft vignette, and
+      // anti-aliasing (the composer's targets have none of the canvas's own)
+      const [{ ShaderPass }, { SMAAPass }] = await Promise.all([
+        import('three/examples/jsm/postprocessing/ShaderPass.js'),
+        import('three/examples/jsm/postprocessing/SMAAPass.js')
+      ]);
+      const grade = new ShaderPass({
+        uniforms: { tDiffuse: { value: null }, uSat: { value: GRADE.saturation }, uContrast: { value: GRADE.contrast }, uVignette: { value: GRADE.vignette } },
+        vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+        fragmentShader: `uniform sampler2D tDiffuse; uniform float uSat; uniform float uContrast; uniform float uVignette; varying vec2 vUv;
+          void main() {
+            vec4 c = texture2D(tDiffuse, vUv);
+            vec3 col = c.rgb;
+            float l = dot(col, vec3(0.2126, 0.7152, 0.0722));
+            col = mix(vec3(l), col, uSat);
+            col = (col - 0.5) * uContrast + 0.5;
+            vec2 d = vUv - 0.5;
+            col *= 1.0 - uVignette * dot(d, d) * 2.0;
+            gl_FragColor = vec4(clamp(col, 0.0, 1.0), c.a);
+          }`
+      });
+      c.addPass(grade);
+      c.addPass(new SMAAPass());
       c.setSize(innerWidth, innerHeight);
       c.setPixelRatio(this.renderer.getPixelRatio());
       this.composer = c;
@@ -200,6 +233,10 @@ export class Looks {
       this.env?.dispose();
       this.env = built.texture;
       this.scene.environment = built.texture;
+      // the dome is calibrated to look right as a SKY, which puts its blue well above 1 in linear
+      // light; as a light on the ground that much blue washes every colour out to grey. Half of it
+      // lights the world the way the photographs show the hillside lit.
+      this.scene.environmentIntensity = ENV_INTENSITY;
       // the sky is its own light now; the hemisphere fill that stood in for it can ease off
       return true;
     } catch {

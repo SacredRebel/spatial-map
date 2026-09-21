@@ -214,3 +214,19 @@ canvas { display: block; touch-action: none; }
 .credits .credit + .credit::before { content: ' · '; }
 .credits a { color: inherit; }
 .credits .credit-logo { height: 12px; vertical-align: middle; margin: 0 2px; }
+
+/* the biomimetic controls: sliders that grow an organic building again */
+.ep-organic { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr; gap: 3px; margin: 4px 0; }
+.ep-organic .ep-inline { display: flex; justify-content: space-between; margin: 0; }
+.ep-organic .ep-inline select { min-width: 120px; }
+.ep-range { display: grid !important; grid-template-columns: 78px 1fr 64px; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-2); }
+.ep-range input[type="range"] { width: 100% !important; padding: 0 !important; accent-color: #7bc47f; background: none !important; border: 0 !important; }
+.ep-range output { font: 500 10px var(--mono); color: var(--ink); text-align: right; white-space: nowrap; }
+.ep-form input[data-org-name] { width: 100%; font-family: var(--font); }
+.ep-orghead { margin: 8px 0 2px; padding-top: 6px; border-top: 1px dashed var(--line); color: #9fd89f; font-size: 11px; }
+.ep-qty { margin: 6px 0; padding: 6px 8px; border-radius: 8px; background: rgba(123,196,127,0.08); border: 1px solid rgba(123,196,127,0.25); font-size: 11px; line-height: 1.5; color: var(--ink-2); }
+.ep-qty b { color: #9fd89f; }
+/* the agent's quick asks on marked ground */
+.mg-chips { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 10px 0; }
+.mg-chip { border: 1px solid rgba(245,197,66,0.45); background: rgba(245,197,66,0.08); color: var(--ink); border-radius: 999px; padding: 3px 9px; font: 500 11px var(--font); cursor: pointer; }
+.mg-chip:hover { background: rgba(245,197,66,0.2); }

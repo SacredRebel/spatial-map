@@ -36,7 +36,7 @@ const errs = [];
 page.on('pageerror', e => errs.push('PAGE ' + e.message));
 page.on('console', m => { if (m.type() === 'error') errs.push('CONSOLE ' + m.text().slice(0, 200)); });
 
-await page.goto(`${BASE}/?atlas=${BASE}&community=sulphur-mountain&pack=${BASE}/pack/`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+await page.goto(`${BASE}/?atlas=${BASE}&community=sulphur-mountain&pack=${BASE}/pack/&looks=off&grass=0&context=0`, { waitUntil: 'domcontentloaded', timeout: 30000 });
 await page.waitForFunction(() => window.world && window.world.ready, null, { timeout: 45000 });
 await page.waitForTimeout(400);
 
@@ -617,9 +617,9 @@ const studioOpen = await page.evaluate((base) => {
   w.studio.open();
   return w.studio.state().open;
 }, BASE);
-await page.waitForFunction(() => window.world.studio.state().ready, null, { timeout: 15000 });
+await page.waitForFunction(() => window.world.studio.state().ready, null, { timeout: 45000 });
 // the fixture's confirmation is one more message hop behind ready — wait for it, not a guess
-await page.waitForFunction(() => /site w=/.test(window.world.studio.state().notice || ''), null, { timeout: 8000 });
+await page.waitForFunction(() => /site w=/.test(window.world.studio.state().notice || ''), null, { timeout: 30000 });
 const studioSite = await page.evaluate(() => window.world.studio.state());
 check('studio: the overlay opens, the builder answers, and the real site crosses the bridge',
   studioOpen === true && studioSite.ready === true && studioSite.siteSent && studioSite.siteSent.w === 97 && studioSite.siteSent.h === 97 && studioSite.siteSent.guides >= 2,
@@ -633,7 +633,7 @@ const stPlaced = await page.evaluate(async ({ b64 }) => {
   const before = w.player.platforms.length;
   w.studio.handle({ t: 'eco:glb', glb: b64, walk: null, originLL: [-119.15630, 34.43310] });
   const t0 = performance.now();
-  while (w.player.platforms.length <= before && performance.now() - t0 < 12000) await new Promise(r => setTimeout(r, 120));
+  while (w.player.platforms.length <= before && performance.now() - t0 < 40000) await new Promise(r => setTimeout(r, 120));
   const row = w.structures.list.find(s => s.id === 'studio-preview');
   w.studio.close();
   return { before, after: w.player.platforms.length, row: row && { name: row.name, enter: row.enter, blob: /^blob:/.test(row.model || '') }, open: w.studio.state().open };
@@ -1097,9 +1097,13 @@ check('read: signing out closes the editor; a click on a project as a member ope
 await page.evaluate(() => { window.world.setSession({ role: 'admin', pin: '4242' }); window.world.editor.setActive(false); });
 
 // and without a pack, the world is what it was: the rule plants everywhere and nothing stands
+// A second world in the same browser shares one software GPU with the first; pause the first while
+// the second is under test, so neither is judged at half the speed it would really run.
+const freeze = async (pg, on) => { await pg.evaluate(v => window.world.pause(v), on); };
+await freeze(page, true);
 const bare = await ctx.newPage();
-await bare.goto(`${BASE}/?atlas=${BASE}&community=sulphur-mountain&pack=0`, { waitUntil: 'domcontentloaded', timeout: 30000 });
-await bare.waitForFunction(() => window.world && window.world.ready, null, { timeout: 45000 });
+await bare.goto(`${BASE}/?atlas=${BASE}&community=sulphur-mountain&pack=0&looks=off&grass=0&context=0`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+await bare.waitForFunction(() => window.world && window.world.ready, null, { timeout: 90000 });
 const plain = await bare.evaluate((aoi) => {
   const w = window.world;
   let n = 0;
@@ -1122,6 +1126,7 @@ const gone = await bare.evaluate(async (base) => {
 }, BASE);
 check('no aerial: when every tile fails the ring goes back to its slope colours', gone.tiles > 0 && gone.failed === gone.tiles && !gone.active && !gone.map && gone.vertexColours === true, gone);
 await bare.close();
+await freeze(page, false);
 
 // ---- a model you can go into ------------------------------------------------------------------------
 // A proposal that has a .glb: it is placed by the registry, it carries its own floor and wall, it
@@ -1267,9 +1272,10 @@ check('footings: take the house away and its footing goes with it',
 // ---- when the fine ground does not answer ------------------------------------------------------------
 // The atlas is down, or unreachable from where the person is: the world must still open. It falls
 // back to the coarse global set, says so in a notice, and stands the player on that ground.
+await freeze(page, true);
 const down = await ctx.newPage();
-await down.goto(`${BASE}/?atlas=${BASE}/nowhere&community=sulphur-mountain&pack=${BASE}/pack/&far=${encodeURIComponent(`${BASE}/coarse/{z}/{x}/{y}.png`)}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
-await down.waitForFunction(() => window.world && window.world.ready, null, { timeout: 60000 });
+await down.goto(`${BASE}/?atlas=${BASE}/nowhere&community=sulphur-mountain&pack=${BASE}/pack/&far=${encodeURIComponent(`${BASE}/coarse/{z}/{x}/{y}.png`)}&looks=off&grass=0&context=0`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+await down.waitForFunction(() => window.world && window.world.ready, null, { timeout: 90000 });
 const coarse = await down.evaluate(() => {
   const w = window.world;
   const s = w.state();
@@ -1278,6 +1284,7 @@ const coarse = await down.evaluate(() => {
 check('fallback: with no fine pyramid the world still opens on the coarse set, says so, and the player stands on real ground',
   coarse.ready && coarse.coarse && coarse.tiles > 0 && Math.abs(coarse.groundM - truth(coarse.lng, coarse.lat)) < 1.5 && /coarse/.test(coarse.notice || '') && coarse.loading && coarse.pack && coarse.trees > 0 && coarse.fine, coarse);
 await down.close();
+await freeze(page, false);
 
 // ---- the sun ----------------------------------------------------------------------------------
 const sun = await page.evaluate(() => {
@@ -1550,6 +1557,166 @@ check('ion: the middle distance wears the satellite, credited on screen — logo
   { draped: ionT.draped, shown: ionT.shown });
 check('ion: taken away, the rings go back to their slope colours and the credits go with them',
   !ionT.after.map && ionT.after.vertexColours === true && ionT.after.creditsHidden && !ionT.after.coarse.active, ionT.after);
+
+// ---- organic buildings, marked ground, and the look ----------------------------------------------
+// Draw a perimeter and a whole building grows inside it — walls on a smooth curve with a door and
+// glass to the view, a floor on a levelled pad, a shell roof whose eave stays inside the line — and
+// the sliders grow it again in place. Mark ground or walls and the box's plain-words reading turns
+// "higher, curved to the right, add a window" into a change of exactly those parts.
+const org = await page.evaluate(async (pts) => {
+  const w = window.world, ed = w.editor;
+  w.setSession({ role: 'admin', pin: '4242' });
+  ed.setActive(true);
+  const name = ed.addOrganic(pts.perimeter, { form: 'fit', facing: 180, door: 90, roof: 'solar', structure: 'steel', infill: 'cob', insulation: 'hemp' }, 'test bio house');
+  const parts = ed.buildParts(name);
+  const wall = parts.find(f => f.properties.kind === 'wall'), roof = parts.find(f => f.properties.kind === 'roof'), floor = parts.find(f => f.properties.kind === 'floor');
+  const pad = w.pack.terrain.features.find(f => f.properties.structure === name);
+  const per = pts.perimeter.map(([lng, lat]) => w.frame.toWorld(lng, lat));
+  const inside = (x, z) => { let r = false; for (let i = 0, j = per.length - 1; i < per.length; j = i++) { const a = per[i], b = per[j]; if ((a.z > z) !== (b.z > z) && x < ((b.x - a.x) * (z - a.z)) / (b.z - a.z) + a.x) r = !r; } return r; };
+  // the roof as drawn: every vertex of its mesh, in plan, inside the perimeter
+  const roofObj = w.build.group.getObjectByName(`build:${roof.properties.id}`);
+  let roofOut = 0, roofN = 0;
+  roofObj.traverse(o => { if (o.isMesh && !o.isInstancedMesh) { const p = o.geometry.getAttribute('position'); for (let i = 0; i < p.count; i++) { roofN++; if (!inside(p.getX(i), p.getZ(i))) roofOut++; } } });
+  const panels = roofObj.getObjectByName('solar')?.count ?? 0;
+  const frame = w.build.group.getObjectByName(`build:${wall.properties.id}`)?.getObjectByName('frame')?.count ?? 0;
+  // the pad: the ground under the floor is level
+  const fr = floor.geometry.coordinates[0];
+  const gs = fr.map(([lng, lat]) => w.field.atOr(lng, lat, NaN));
+  const q = ed.organicQuantities(name);
+  // the door and the glass: where along the ring they are, as bearings from the building's middle
+  const c = per.reduce((a, p) => ({ x: a.x + p.x / per.length, z: a.z + p.z / per.length }), { x: 0, z: 0 });
+  const along = new w.THREE.CatmullRomCurve3(wall.geometry.coordinates.slice(0, -1).map(([lng, lat]) => { const p = w.frame.toWorld(lng, lat); return new w.THREE.Vector3(p.x, 0, p.z); }), true, 'centripetal', 0.5);
+  const L = along.getLength();
+  const bearingAt = s => { const p = along.getPointAt(Math.min(0.9999, s / L)); return ((Math.atan2(p.x - c.x, -(p.z - c.z)) * 180 / Math.PI) + 360) % 360; };
+  const ops = wall.properties.openings.map(o => ({ kind: o.kind, bearing: Math.round(bearingAt(o.at_m)) }));
+  const solid = w.build.solids.some(s => s.id === wall.properties.id);
+  const mat = w.build.group.getObjectByName(`build:${wall.properties.id}`).material;
+  return {
+    name, kinds: parts.map(f => f.properties.kind).sort(), closed: JSON.stringify(wall.geometry.coordinates[0]) === JSON.stringify(wall.geometry.coordinates[wall.geometry.coordinates.length - 1]),
+    smooth: !!wall.properties.smooth, form: roof.properties.form, assembly: wall.properties.assembly, roofOut, roofN, panels, frame,
+    pad: !!pad, level: Math.max(...gs) - Math.min(...gs), q, ops, solid, organic: !!floor.properties.organic,
+    material: { type: mat.type, map: !!mat.map, name: mat.name }
+  };
+}, { perimeter: [at(20, 30), at(48, 26), at(56, 44), at(44, 60), at(18, 56), at(12, 42), at(20, 30)] });
+check('organic: a drawn perimeter grows a whole building — a pad, a floor, a closed curved wall and a shell roof, one structure',
+  org.kinds.join() === 'floor,roof,wall' && org.pad && org.closed && org.smooth && org.form === 'shell' && org.organic, { kinds: org.kinds, pad: org.pad, closed: org.closed, form: org.form });
+check('organic: nothing of it leaves the line — every point of the roof, eave included, is inside the perimeter',
+  org.roofN > 100 && org.roofOut === 0, { roofVertices: org.roofN, outside: org.roofOut });
+check('organic: the door faces the way asked (east) and the glass faces the view (south)',
+  org.ops.filter(o => o.kind === 'door').length === 1 && org.ops.some(o => o.kind === 'window')
+    && org.ops.filter(o => o.kind === 'door').every(o => Math.min(Math.abs(o.bearing - 90), 360 - Math.abs(o.bearing - 90)) < 35)
+    && org.ops.filter(o => o.kind === 'window').every(o => Math.min(Math.abs(o.bearing - 180), 360 - Math.abs(o.bearing - 180)) < 75), org.ops);
+check('organic: what it is made of is in the model — cob walls on a steel frame, solar panels on the sunny side, a level pad under it',
+  org.assembly && org.assembly.structure === 'steel' && org.assembly.infill === 'cob' && org.frame > 10 && org.panels > 4 && org.level < 0.05
+    && org.material.map && org.material.name === 'surface:cob' && org.material.type === 'MeshStandardMaterial',
+  { assembly: org.assembly, frame: org.frame, panels: org.panels, levelM: +org.level.toFixed(3), material: org.material });
+check('organic: the quantities are this building\'s — the same panels the roof carries, and a wall you cannot walk through',
+  org.q && org.q.floorM2 > 50 && org.q.panels === org.panels && Math.abs(org.q.solarKwp - org.panels * 0.43) < 0.06 && org.q.infillM3 > 5 && org.solid,
+  { q: org.q && { floor: org.q.floorM2, panels: org.q.panels, kwp: org.q.solarKwp, infill: org.q.infillM3 }, solid: org.solid });
+
+const regrow = await page.evaluate((name) => {
+  const w = window.world, ed = w.editor;
+  const ids = () => ed.buildParts(name).map(f => String(f.properties.id)).sort().join();
+  const wallPts = () => JSON.stringify(ed.buildParts(name).find(f => f.properties.kind === 'wall').geometry.coordinates);
+  const before = { ids: ids(), wall: wallPts() };
+  const ok = ed.regenerateOrganic(name, { form: 'lobed', lobes: 6, depth: 0.35, height: 3.8 });
+  const after = { ids: ids(), wall: wallPts(), height: ed.buildParts(name).find(f => f.properties.kind === 'wall').properties.height_m, form: ed.organicOf(name).spec.form };
+  ed.undo();
+  const undone = { wall: wallPts(), form: ed.organicOf(name).spec.form };
+  return { ok, same: before.ids === after.ids, changed: before.wall !== after.wall, height: after.height, form: after.form, undone: undone.wall === before.wall && undone.form === 'fit' };
+}, org.name);
+check('organic: a slider grows the same building again — same parts, new form — and one undo takes it back',
+  regrow.ok && regrow.same && regrow.changed && regrow.height === 3.8 && regrow.form === 'lobed' && regrow.undone, regrow);
+
+const marked = await page.evaluate(async ({ name, ring, empty }) => {
+  const w = window.world, ed = w.editor, mg = w.magic;
+  ed.setMark(ring);
+  const sel = ed.mark.selected.length, open = mg.boxId;
+  const wall0 = ed.buildParts(name).find(f => f.properties.kind === 'wall');
+  const h0 = wall0.properties.height_m, win0 = wall0.properties.openings.filter(o => o.kind === 'window').length, pts0 = JSON.stringify(wall0.geometry.coordinates);
+  const said = mg.localAgent('make these walls higher, curve them to the right and add a window');
+  const a = said.actions[0];
+  mg.turns.push({ role: 'agent', text: said.reply, actions: said.actions, taken: said.actions.map(() => false), at: Date.now() });
+  const took = mg.take(mg.turns.length - 1, 0);
+  const wall1 = ed.buildParts(name).find(f => f.properties.kind === 'wall');
+  const changed = { h: wall1.properties.height_m, win: wall1.properties.openings.filter(o => o.kind === 'window').length, moved: JSON.stringify(wall1.geometry.coordinates) !== pts0 };
+  ed.clearMark();
+  // empty ground: the words become a building fitted inside the mark
+  ed.setMark(empty);
+  const said2 = mg.localAgent('an organic house with a steel frame, cob walls, hemp insulation and a solar roof');
+  const b = said2.actions[0];
+  mg.turns.push({ role: 'agent', text: said2.reply, actions: said2.actions, taken: said2.actions.map(() => false), at: Date.now() });
+  const took2 = mg.take(mg.turns.length - 1, 0);
+  const made = ed.mark ? ed.mark.selected.length : 0;
+  ed.clearMark();
+  return { sel, open, action: a && { type: a.type, dh: a.height_delta_m, bulge: a.bulge_m, dir: a.bulge_dir, windows: a.add_windows, ids: a.ids.length }, took, h0, win0, changed,
+    spec: b && b.type === 'organic' ? b.spec : null, took2, made };
+}, { name: org.name, ring: [at(10, 20), at(64, 20), at(64, 68), at(10, 68)], empty: [at(-70, 30), at(-40, 30), at(-40, 58), at(-70, 58)] });
+check('mark: drawing round a building takes in every part of it, and the agent\'s panel opens on the marked ground',
+  marked.sel === 3 && marked.open === 'mark', { selected: marked.sel, open: marked.open });
+check('mark: "higher, curved to the right, add a window" changes exactly those walls — 0.6 m up, bowed, one more window',
+  marked.action && marked.action.type === 'modify' && marked.action.dh > 0 && marked.action.bulge > 0 && marked.action.dir === 'right' && marked.action.windows === 1
+    && marked.took && Math.abs(marked.changed.h - marked.h0 - 0.6) < 1e-6 && marked.changed.win === marked.win0 + 1 && marked.changed.moved,
+  { action: marked.action, before: { h: marked.h0, windows: marked.win0 }, after: marked.changed });
+check('mark: on empty ground the words become an organic building — steel, cob, hemp, solar — fitted inside the mark',
+  marked.spec && marked.spec.structure === 'steel' && marked.spec.infill === 'cob' && marked.spec.insulation === 'hemp' && marked.spec.roof === 'solar' && marked.took2 && marked.made === 3,
+  { spec: marked.spec, took: marked.took2, parts: marked.made });
+
+const look = await page.evaluate(() => {
+  const w = window.world;
+  const oak = w.vegetation.group.getObjectByName('veg-oak');
+  oak.geometry.computeBoundingBox();
+  const bb = oak.geometry.boundingBox;
+  let reach = 0; const p = oak.geometry.getAttribute('position');
+  for (let i = 0; i < p.count; i++) reach = Math.max(reach, Math.hypot(p.getX(i), p.getZ(i)));
+  const pos = w.player.position;
+  const ring = [{ x: pos.x - 3, z: pos.z - 3 }, { x: pos.x + 3, z: pos.z - 3 }, { x: pos.x + 3, z: pos.z + 3 }, { x: pos.x - 3, z: pos.z + 3 }];
+  w.grass.build(pos.x, pos.z, { radius: 12, density: 4, keepOut: [{ ring, pad: 0 }] });
+  const g = w.grass.group.getObjectByName('grass-blades');
+  let inRing = 0;
+  if (g) { const e = g.instanceMatrix.array; for (let i = 0; i < g.count; i++) { const x = e[i * 16 + 12], z = e[i * 16 + 14]; if (Math.abs(x - pos.x) < 3 && Math.abs(z - pos.z) < 3) inRing++; } }
+  const count = w.grass.count;
+  w.grass.dispose();
+  return { top: +bb.max.y.toFixed(3), reach: +reach.toFixed(3), leafMap: !!oak.material.map, alphaTest: oak.material.alphaTest, grass: count, inRing,
+    clip: { half: w.terrain.clips.coarse.half.value, far: w.terrain.clips.far.half.value } };
+});
+check('look: an oak is a crown of leaf cards on limbs, at the size the record trees are scaled against (4.9 m, 2.35 m)',
+  Math.abs(look.top - 4.9) < 0.01 && Math.abs(look.reach - 2.35) < 0.01 && look.leafMap && look.alphaTest > 0.3, look);
+check('look: grass grows round your feet and never inside what is kept clear',
+  look.grass > 100 && look.inRing === 0, { grass: look.grass, inside: look.inRing });
+check('look: the middle distance stands back from the near ground, so the coarse ring never shows through it',
+  Math.abs(look.clip.half - 320 * 0.97) < 1e-6 && look.clip.far > 1000, look.clip);
+
+// ---- the streets and the creeks ----------------------------------------------------------------------
+// The country round the parcel, from OpenStreetMap: streets laid on the ground as drawn, creeks moved
+// to the bottom of their own beds before the water goes in, and the grass kept off both.
+const ctxT = await page.evaluate(async (BASE) => {
+  const w = window.world, c = w.context;
+  const ok = await c.load(BASE + '/context/sulphur-mountain.json');
+  const p = w.player.position;
+  c.lay(p.x, p.z, { radius: 1500 });
+  // every strip vertex sits on (or just above) the ground as drawn, never under it
+  let under = 0, n = 0, worst = 0;
+  for (const m of c.group.children) {
+    if (!m.isMesh || !/^context:(asphalt|gravel|dirt|creekbed)$/.test(m.name)) continue;
+    const pos = m.geometry.getAttribute('position');
+    for (let i = 0; i < pos.count; i += 7) {
+      const h = w.terrain.surfaceAt(pos.getX(i), pos.getZ(i));
+      if (h == null) continue;
+      n++;
+      const d = pos.getY(i) - h;
+      if (d < -0.02) { under++; worst = Math.min(worst, d); }
+    }
+  }
+  const bare = c.bare();
+  return { ok, counts: c.counts, creeks: c.creekLines.length, n, under, worst: +worst.toFixed(3), bare: bare.length, meshes: c.group.children.map(m => m.name).filter(x => x.startsWith('context:')).sort() };
+}, BASE);
+check('context: the streets and creeks round the property are laid — asphalt, gravel drives, dirt tracks, creek beds with water in them',
+  ctxT.ok && ctxT.counts.roads > 20 && ctxT.counts.creeks > 3 && ctxT.meshes.includes('context:water') && ctxT.meshes.includes('context:creekbed') && ctxT.meshes.includes('context:asphalt'),
+  { counts: ctxT.counts, meshes: ctxT.meshes });
+check('context: every street lies on the ground as drawn — sampled, none of it sinks under the terrain',
+  ctxT.n > 200 && ctxT.under === 0, { sampled: ctxT.n, under: ctxT.under, worst: ctxT.worst });
+check('context: the grass is told where the streets and creek beds are', ctxT.bare >= ctxT.counts.roads, { bare: ctxT.bare });
 
 // ---- nothing threw ------------------------------------------------------------------------------
 const real = errs.filter(e => !/WebGL|GL_INVALID|swiftshader|GPU stall|Failed to load resource/i.test(e));

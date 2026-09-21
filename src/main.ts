@@ -23,7 +23,10 @@ import * as THREE from 'three';
 import { Frame } from './world/geo';
 import { HeightField, GLOBAL_TERRAIN } from './world/heightfield';
 import { Terrain } from './world/terrain';
-import { Vegetation } from './world/vegetation';
+import { Vegetation, setWind, WIND } from './world/vegetation';
+import { Grass, type GrassOpts } from './world/grass';
+import { Context } from './world/context';
+import { flowWater } from './world/materials';
 import { Sky } from './world/sky';
 import { instantAt } from './world/sun';
 import { Structures } from './world/structures';
@@ -174,13 +177,28 @@ const field = new HeightField(atlas, farSource);
 const terrain = new Terrain(frame, field);
 const vegetation = new Vegetation(frame, field);
 const sky = new Sky();
-// The occlusion and the sky-lit ambient are OFF unless asked for: ?looks=auto|plain|full.
+sky.clouds = num('clouds', 0.32, 0, 0.7);
+/**
+ * The grass round your feet. ?grass=0 takes it away; a phone grows a smaller, thinner patch.
+ * It regrows as you walk, when the aerial under it arrives, and when what stands on the ground changes.
+ */
+const grassParam = qs.get('grass');
+const grassOn = grassParam !== '0' && plantDensity > 0;
+const touchy = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+const GRASS = { radius: touchy ? 16 : 26, density: (touchy ? 4 : 9) * Math.min(1.5, Math.max(0.3, Number(grassParam) || 1)) };
+const grass = new Grass(frame, field, WIND);
+/** the streets and the creeks round the property (OpenStreetMap), laid on the drawn ground; ?context=0 leaves them off */
+const context = new Context(frame, field, terrain);
+const contextOn = qs.get('context') !== '0';
+const CONTEXT = { radius: touchy ? 900 : 1500 };
+let grassSig = '';
+// The occlusion, the sky-lit ambient and the finishing passes are ON by default now: ?looks=off|plain|full.
 //
-//   The sun in this world is the real NOAA position and it already reads correctly; the owner's
-//   call is that the picture is good enough as it stands and the effort belongs on the house. So
-//   the chain is built, tested and parked — nothing here costs a frame or a byte until someone
-//   types the parameter, and 'auto' then reads the device the way it always would have.
-const looksWant = (qs.get('looks') as Quality | 'auto' | null) ?? 'off';
+//   They were parked while the owner's call was that the effort belonged on the house. The call
+//   has changed — the world has to impress someone seeing it for the first time — so 'auto' reads
+//   the device and picks a rung, and the watchdog still steps down a rung the moment a machine
+//   cannot afford it. ?looks=off gives back the plain renderer exactly as it was.
+const looksWant = (qs.get('looks') as Quality | 'auto' | null) ?? 'auto';
 const looks = new Looks({ renderer, scene, camera, want: looksWant });
 const structures = new Structures(frame, field, atlas);
 const today = new Today(frame, field);
@@ -224,16 +242,21 @@ function rebuildFootings() {
   if (footing.mesh) footGroup.add(footing.mesh);
 }
 
+/** what must be credited on screen, by who supplied it */
+const credits: { ion: string[]; osm: string[] } = { ion: [], osm: [] };
+function showCredits() { hud.setCredits([...credits.ion, ...credits.osm]); }
+
 /** show a resolved source on the distant rings, with its credits — or take both away */
 async function applyIon(src: IonImagery | null) {
   ion = src;
   terrain.setDistantImagery(src ? { url: src.url, maxzoom: src.maxzoom } : null);
-  hud.setCredits(src ? src.credits : []);
+  credits.ion = src ? src.credits : [];
+  showCredits();
   if (!src?.viewportCopyright) return;
   // Google asks that the copyright for the ground actually in view be shown alongside its logo
   const views = [terrain.distantView('coarse'), terrain.distantView('far')].filter(Boolean) as { box: [number, number, number, number]; z: number }[];
   const lines = (await Promise.all(views.map(v => src.viewportCopyright!(v.box, v.z)))).filter(Boolean) as string[];
-  if (ion === src) hud.setCredits([...src.credits, ...lines]);
+  if (ion === src) { credits.ion = [...src.credits, ...lines]; showCredits(); }
 }
 
 function refreshWalk() {
@@ -290,7 +313,7 @@ if (roleParam === 'builder' || roleParam === 'admin') session = { role: rolePara
 const caps = () => CAPS[session.role];
 const grid = new GroundGrid(frame, field);
 
-scene.add(terrain.group, vegetation.group, structures.group, today.group, build.group, player.object, grid.group, footGroup);
+scene.add(terrain.group, vegetation.group, grass.group, context.group, structures.group, today.group, build.group, player.object, grid.group, footGroup);
 sky.addTo(scene);
 
 // the clock is the community's own wall time, not the viewer's: a shadow at half past two means
@@ -570,6 +593,21 @@ function keepOut() {
   return out;
 }
 
+/** what the grass needs to know: where it may not grow, and the photograph's colour under it */
+function grassOpts(): GrassOpts {
+  const bare: GrassOpts['bare'] = [];
+  const line = (coords: [number, number][], half: number) => bare!.push({ pts: coords.map(([lng, lat]) => frame.toWorld(lng, lat)), half });
+  if (pack) {
+    for (const f of pack.county.features) if (f.properties.layer === 'road' && f.geometry.type === 'LineString') line(f.geometry.coordinates, 2.6);
+    for (const f of pack.lines.features) if (f.geometry.type === 'LineString' && f.properties.kind !== 'fence') line(f.geometry.coordinates, f.properties.kind === 'road' ? 2.1 : 0.9);
+  }
+  if (contextOn) bare.push(...context.bare());
+  const ko = keepOut();
+  for (const f of footing?.solids ?? []) ko.push({ ring: f.ring, pad: 0 });
+  for (const f of pack?.terrain.features ?? []) if (f.geometry.type === 'Polygon' && f.properties.structure) ko.push({ ring: f.geometry.coordinates[0].map(([lng, lat]) => frame.toWorld(lng, lat)), pad: 0 });
+  return { radius: GRASS.radius, density: grassOn ? GRASS.density : 0, keepOut: ko, bare, groundColour: (x, z) => terrain.groundColour(x, z) };
+}
+
 async function boot() {
   hud.setLoading('reading the ground…');
   // the pack first: it may say where its own ground is kept, and the world should not depend on
@@ -651,6 +689,16 @@ async function boot() {
 
   hud.setLoading(null);
   ready = true;
+  // the streets and the creeks: a small file beside the world, in the background
+  if (contextOn) void context.load(`${import.meta.env.BASE_URL}context/${slug}.json`).then(ok => {
+    if (!ok) return;
+    credits.osm = ['<a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap contributors</a>'];
+    showCredits();
+    const q = player.position;
+    context.lay(q.x, q.z, CONTEXT);
+    // the trees close in along the water
+    vegetation.build(q.x, q.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity, exclude: packRing(), wet: context.creekLines });
+  });
   (window as unknown as { world: unknown }).world = api;
 
   // the character, last: the world is already walkable with the built-in body, and a slow or
@@ -663,6 +711,8 @@ async function boot() {
 }
 
 let ready = false;
+/** a paused world draws nothing and moves nothing — for a shell that has put it behind something else, and for tests running a second world beside it */
+let paused = false;
 let last = performance.now();
 let shownMode = '';
 
@@ -671,6 +721,7 @@ function loop() {
   const now = performance.now();
   const dt = (now - last) / 1000;
   last = now;
+  if (paused) return;
   if (ready) {
     //   The tour writes the eye BEFORE the player updates, so a leg that lands the camera somewhere
     //   is not immediately undone by a frame of flight physics. Anything else this frame — the
@@ -682,7 +733,15 @@ function loop() {
     editor.frame();
     const p = player.position;
     terrain.update(p.x, p.z, FINE);
-    vegetation.update(p.x, p.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity, exclude: packRing() });
+    vegetation.update(p.x, p.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity, exclude: packRing(), wet: context.creekLines });
+    if (contextOn) context.update(p.x, p.z, CONTEXT);
+    flowWater(now / 1000);
+    setWind(now / 1000);
+    sky.tick(now / 1000);
+    // the grass regrows when you have walked on, when the photograph under it lands, or when what stands changed
+    const gs = `${terrain.drapeVersion}:${context.counts.roads}:${context.creekLines.length}:${structures.platforms.length}:${build.platforms.length}:${build.solids.length}:${pack?.terrain.features.length ?? 0}`;
+    if (grassOn && (gs !== grassSig || !grass.count)) { if (gs !== grassSig) { grassSig = gs; grass.build(p.x, p.z, grassOpts()); } }
+    if (grassOn) grass.update(p.x, p.z, { radius: GRASS.radius, density: GRASS.density, keepOut: [] }, () => grassOpts());
     sky.mesh.position.copy(camera.position);
     // the light rides with the player so the shadow map stays tight around them; its direction is
     // the sun's. (It used to be derived from its own last position, which the same line had just
@@ -783,8 +842,13 @@ const api = {
   replant: () => {
     const p = player.position;
     vegetation.build(p.x, p.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity, exclude: packRing() });
+    if (grassOn) grass.build(p.x, p.z, grassOpts());
     return vegetation.counts;
   },
+  grass,
+  context,
+  /** stop drawing (true) or start again (false) */
+  pause: (on: boolean) => { paused = on; },
   setAvatar: async (url: string | null) => {
     const rig = await loadAvatar(url);
     player.setRig(rig);

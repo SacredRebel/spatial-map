@@ -55,8 +55,37 @@ function shade(slope: number, h: number, lo: number, hi: number, out: THREE.Colo
   out.lerp(SHADE, 0.12 * (1 - steep));
 }
 
+/**
+ * A ring does not draw where a finer ring already is.
+ *
+ *   The coarse ring is sampled every 25 m and the ground between its vertices is a straight line; in
+ *   every hollow of a real hillside that line runs above the 1 m ground, and a coarse ring only
+ *   dropped fifteen centimetres pokes up through the fine one in broad dark sheets — over the
+ *   photograph, over the grain, over everything that makes the ground near you look real. So each
+ *   outer ring throws away its own fragments inside the square the next ring in covers, less a
+ *   margin that keeps the two overlapping at the seam so no sky shows between them.
+ */
+function clipInside(mat: THREE.Material, clip: { centre: { value: THREE.Vector2 }; half: { value: number } }) {
+  mat.onBeforeCompile = shader => {
+    shader.uniforms.uClipCentre = clip.centre;
+    shader.uniforms.uClipHalf = clip.half;
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec2 vClipXZ;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvClipXZ = (modelMatrix * vec4(transformed, 1.0)).xz;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying vec2 vClipXZ;\nuniform vec2 uClipCentre; uniform float uClipHalf;')
+      .replace('void main() {', 'void main() {\n  if (uClipHalf > 0.0 && abs(vClipXZ.x - uClipCentre.x) < uClipHalf && abs(vClipXZ.y - uClipCentre.y) < uClipHalf) discard;');
+  };
+  mat.customProgramCacheKey = () => 'clip-inside';
+}
+
 export class Terrain {
   group = new THREE.Group();
+  /** where the coarse ring stops drawing (the fine ring's square) and where the far ring does (the coarse ring's) */
+  readonly clips = {
+    coarse: { centre: { value: new THREE.Vector2() }, half: { value: 0 } },
+    far: { centre: { value: new THREE.Vector2() }, half: { value: 0 } }
+  };
   private fine: THREE.Mesh | null = null;
   private coarse: THREE.Mesh | null = null;
   private far: THREE.Mesh | null = null;
@@ -72,6 +101,10 @@ export class Terrain {
   imageryState = { z: 0, tiles: 0, loaded: 0, failed: 0, active: false };
   /** resolves when every tile of the current drape has arrived or failed */
   imageryReady: Promise<void> = Promise.resolve();
+  /** the near drape's pixels, kept once it has arrived, so things on the ground can take its colour */
+  private drapeSample: { data: Uint8ClampedArray; W: number; H: number; west: number; east: number; mS: number; mN: number } | null = null;
+  /** bumped each time the near drape's pixels change — the grass regrows when it does */
+  drapeVersion = 0;
 
   // the imagery beyond the parcel: the middle distance and the far ridges, from a wider source
   private distant: TileSource | null = null;
@@ -116,7 +149,7 @@ export class Terrain {
     if (this.fine) {
       this.group.remove(this.fine);
       this.fine.geometry.dispose();
-      const m = this.fine.material as THREE.MeshLambertMaterial;
+      const m = this.fine.material as THREE.MeshStandardMaterial;
       m.map?.dispose();
       m.dispose();
     }
@@ -125,6 +158,10 @@ export class Terrain {
     this.group.add(this.fine);
     this.fineCentre.set(centreX, centreZ);
     this.fineOpts = o;
+    // the coarse ring now stands back from this square, keeping 3 % of it as overlap at the seam
+    this.clips.coarse.centre.value.set(centreX, centreZ);
+    this.clips.coarse.half.value = o.radius * 0.97;
+    this.fineVersion++;
     this.grainActive = false;
     if (this.imagery) this.drape(this.fine, centreX, centreZ, o);
     else this.imageryState = { z: 0, tiles: 0, loaded: 0, failed: 0, active: false };
@@ -171,7 +208,7 @@ export class Terrain {
       uv[i * 2 + 1] = (mercY(ll.lat) - mS) / (mN - mS);
     }
     mesh.geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-    const mat = mesh.material as THREE.MeshLambertMaterial;
+    const mat = mesh.material as THREE.MeshStandardMaterial;
     mat.map = tex;
     mat.vertexColors = false;
     mat.color.set('#ffffff');
@@ -188,7 +225,12 @@ export class Terrain {
       } else this.imageryState.failed++;
     }))).then(() => {
       // a photograph that never arrived is not a photograph: give the ring its slope colours back
-      if (gen === this.drapeGen && this.imageryState.loaded === 0) this.undrape(mesh);
+      if (gen === this.drapeGen && this.imageryState.loaded === 0) { this.undrape(mesh); return; }
+      if (gen !== this.drapeGen) return;
+      try {
+        this.drapeSample = { data: g.getImageData(0, 0, W, H).data, W, H, west, east, mS, mN };
+        this.drapeVersion++;
+      } catch { this.drapeSample = null; /* a tile without CORS taints the canvas: no colours to read, and that is fine */ }
     });
   }
 
@@ -236,7 +278,7 @@ export class Terrain {
       uv[i * 2 + 1] = (mercY(ll.lat) - mS) / (mN - mS);
     }
     mesh.geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-    const mat = mesh.material as THREE.MeshLambertMaterial;
+    const mat = mesh.material as THREE.MeshStandardMaterial;
     mat.map?.dispose();
     mat.map = tex;
     mat.vertexColors = false;
@@ -260,7 +302,7 @@ export class Terrain {
     this.distantState[k] = blankDrape();
     this.distantDone[k] = Promise.resolve();
     if (!mesh) return;
-    const mat = mesh.material as THREE.MeshLambertMaterial;
+    const mat = mesh.material as THREE.MeshStandardMaterial;
     mat.map?.dispose();
     mat.map = null;
     mat.vertexColors = true;
@@ -278,7 +320,9 @@ export class Terrain {
   }
 
   private undrape(mesh: THREE.Mesh) {
-    const mat = mesh.material as THREE.MeshLambertMaterial;
+    this.drapeSample = null;
+    this.drapeVersion++;
+    const mat = mesh.material as THREE.MeshStandardMaterial;
     mat.map?.dispose();
     mat.map = null;
     mat.vertexColors = true;
@@ -306,6 +350,55 @@ export class Terrain {
     return p;
   }
 
+  /** bumped each time the near ring is rebuilt — things laid on the rings (streets, creeks) are laid again */
+  fineVersion = 0;
+
+  /**
+   * The height of the ground AS DRAWN under a world point — not the field, but the triangles of
+   * whichever ring is showing there, worked out exactly the way the mesh was built. A street laid on
+   * the 1 m field would sink under the coarse ring's straight 25 m spans in every hollow; laid on
+   * this, it lies on what you see.
+   */
+  surfaceAt(x: number, z: number): number | null {
+    const on = (c: THREE.Vector2, o: TerrainOpts | null, drop: number): number | null => {
+      if (!o) return null;
+      const n = o.segments, step = (o.radius * 2) / (n - 1);
+      const gx = (x - (c.x - o.radius)) / step, gz = (z - (c.y - o.radius)) / step;
+      if (gx < 0 || gz < 0 || gx >= n - 1 || gz >= n - 1) return null;
+      const i = Math.floor(gx), j = Math.floor(gz), fx = gx - i, fz = gz - j;
+      const h = (ii: number, jj: number) => {
+        const ll = this.frame.toLngLat(c.x - o.radius + ii * step, c.y - o.radius + jj * step);
+        return this.field.atOr(ll.lng, ll.lat, 0) + drop;
+      };
+      // the mesh's two triangles per cell: (a, d, b) below the diagonal and (b, d, e) above it
+      if (fx + fz <= 1) { const a = h(i, j), b = h(i + 1, j), d = h(i, j + 1); return a + fx * (b - a) + fz * (d - a); }
+      const b = h(i + 1, j), d = h(i, j + 1), e = h(i + 1, j + 1);
+      return e + (1 - fx) * (d - e) + (1 - fz) * (b - e);
+    };
+    const inside = (c: THREE.Vector2, half: number) => Math.abs(x - c.x) < half && Math.abs(z - c.y) < half;
+    const fine = this.fine && this.fineOpts ? on(this.fineCentre, this.fineOpts, 0) : null;
+    const coarseShown = this.coarse && this.coarseOpts && !inside(this.clips.coarse.centre.value, this.clips.coarse.half.value);
+    const coarse = coarseShown ? on(this.coarseCentre, this.coarseOpts, -0.15) : null;
+    if (fine != null && coarse != null) return Math.max(fine, coarse);
+    if (fine != null) return fine;
+    if (coarse != null) return coarse;
+    const farShown = this.far && this.farOpts && !inside(this.clips.far.centre.value, this.clips.far.half.value);
+    return farShown ? on(this.farCentre, this.farOpts, -0.6) : null;
+  }
+
+  /** the photograph's colour of the ground under a world point, sRGB 0..1, or null where there is none */
+  groundColour(x: number, z: number): [number, number, number] | null {
+    const d = this.drapeSample;
+    if (!d) return null;
+    const ll = this.frame.toLngLat(x, z);
+    const u = (ll.lng - d.west) / (d.east - d.west);
+    const v = (Math.log(Math.tan(Math.PI / 4 + (ll.lat * Math.PI) / 360)) - d.mS) / (d.mN - d.mS);
+    if (u < 0 || u >= 1 || v <= 0 || v > 1) return null;
+    const px = Math.min(d.W - 1, Math.floor(u * d.W)), py = Math.min(d.H - 1, Math.floor((1 - v) * d.H));
+    const i = (py * d.W + px) * 4;
+    return [d.data[i] / 255, d.data[i + 1] / 255, d.data[i + 2] / 255];
+  }
+
   /** the ground has been reshaped: the near rings are sampled again where they stand */
   reshape() {
     if (this.coarse && this.coarseOpts) this.buildCoarse(this.coarseCentre.x, this.coarseCentre.y, this.coarseOpts);
@@ -317,11 +410,14 @@ export class Terrain {
 
   /** the middle distance, built once and left alone */
   buildCoarse(centreX: number, centreZ: number, o: TerrainOpts) {
-    if (this.coarse) { this.group.remove(this.coarse); this.coarse.geometry.dispose(); (this.coarse.material as THREE.MeshLambertMaterial).map?.dispose(); }
+    if (this.coarse) { this.group.remove(this.coarse); this.coarse.geometry.dispose(); (this.coarse.material as THREE.MeshStandardMaterial).map?.dispose(); }
     this.coarseCentre.set(centreX, centreZ);
     this.coarseOpts = o;
     this.coarse = this.build(centreX, centreZ, o, -0.15);
     this.coarse.name = 'terrain-coarse';
+    clipInside(this.coarse.material as THREE.Material, this.clips.coarse);
+    this.clips.far.centre.value.set(centreX, centreZ);
+    this.clips.far.half.value = o.radius * 0.97;
     this.coarse.renderOrder = -1;
     this.group.add(this.coarse);
     if (this.distant) this.drapeDistant('coarse');
@@ -332,11 +428,12 @@ export class Terrain {
 
   /** the horizon: the ridges across the valley, from the coarse global ground, dissolving into the haze */
   buildFar(centreX: number, centreZ: number, o: TerrainOpts) {
-    if (this.far) { this.group.remove(this.far); this.far.geometry.dispose(); (this.far.material as THREE.MeshLambertMaterial).map?.dispose(); }
+    if (this.far) { this.group.remove(this.far); this.far.geometry.dispose(); (this.far.material as THREE.MeshStandardMaterial).map?.dispose(); }
     this.farCentre.set(centreX, centreZ);
     this.farOpts = o;
     this.far = this.build(centreX, centreZ, o, -0.6);
     this.far.name = 'terrain-far';
+    clipInside(this.far.material as THREE.Material, this.clips.far);
     this.far.renderOrder = -2;
     this.far.receiveShadow = false;
     this.group.add(this.far);
@@ -394,7 +491,7 @@ export class Terrain {
     g.setIndex(idx);
     g.computeVertexNormals();
     g.computeBoundingSphere();
-    const m = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.FrontSide });
+    const m = new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.FrontSide, roughness: 1, metalness: 0 });
     const mesh = new THREE.Mesh(g, m);
     mesh.receiveShadow = true;
     return mesh;

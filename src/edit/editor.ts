@@ -33,8 +33,9 @@ import { mergeChanges, type Structures, type Structure, type StructureChange } f
 import { Along, wallLine, MATERIALS, type Build, type Opening, type RoofForm } from '../world/build';
 import type { Caps } from '../world/roles';
 import type { GroundGrid } from './grid';
+import { organicPlan, cleanSpec, ORGANIC_DEFAULT, roofMaterialFor, type OrganicSpec, type Quantities } from '../world/organic';
 
-export type Tool = 'select' | 'marker' | 'tree' | 'fence' | 'path' | 'road' | 'block' | 'magic' | 'zone' | 'terrain' | 'wall' | 'floor' | 'roof' | 'opening';
+export type Tool = 'select' | 'marker' | 'tree' | 'fence' | 'path' | 'road' | 'block' | 'magic' | 'zone' | 'terrain' | 'wall' | 'floor' | 'roof' | 'opening' | 'organic' | 'mark';
 
 export interface ShapeSpec { op: 'flatten' | 'raise' | 'lower'; height: number; edge: number }
 export interface ZoneSpec { name: string; kind: string }
@@ -56,6 +57,24 @@ export type Pick =
   | { kind: 'ground'; point: THREE.Vector3; lng: number; lat: number };
 
 export interface BlockSpec { name: string; w: number; d: number; h: number }
+
+/**
+ * A change asked of existing parts — what the agent proposes for "make these walls higher, curve
+ * them to the right and add a window". Every field is optional; each applies to the parts it fits.
+ */
+export interface ModifySpec {
+  height_m?: number; height_delta_m?: number;
+  thick_m?: number; material?: string; smooth?: boolean;
+  /** bow a wall this many metres at its middle; which way: the viewer's left or right, out of or into its building */
+  bulge_m?: number; bulge_dir?: 'left' | 'right' | 'out' | 'in';
+  add_windows?: number; window_width_m?: number; window_sill_m?: number; window_head_m?: number;
+  add_door?: boolean;
+  /** roofs: raise the crown (shell) or the eaves, change the finish */
+  rise_delta_m?: number; eaves_delta_m?: number; roof_finish?: string;
+}
+
+/** a marked piece of ground: the ring, and the parts it takes in */
+export interface Mark { ring: [number, number][]; selected: string[]; areaM2: number }
 
 export interface EditorOpts {
   dom: HTMLElement;
@@ -127,6 +146,15 @@ export class Editor {
   roof: RoofSpec = { form: 'gable', eaves: 2.7, pitch: 25, overhang: 0.5, material: 'tile', structure: '' };
   opening: OpeningSpec = { kind: 'door', width: 0.9, sill: 0.9, head: 2.1 };
   room: RoomSpec = { name: 'room', w: 6, d: 4, h: 2.7, wall: 'plaster', floor: 'wood', roof: 'gable', roofMaterial: 'tile', door: true };
+  /** the next organic building: its form, its make-up, and what it is called */
+  organic: OrganicSpec = { ...ORGANIC_DEFAULT };
+  organicName = '';
+  /** the ground marked for the agent, and the parts inside it */
+  mark: Mark | null = null;
+  /** what the last organic building would take — the panel shows it */
+  lastQuantities: Quantities | null = null;
+  /** why the last organic building could not be made, when it could not */
+  lastOrganicWhy: string | null = null;
   /** what the last save said, for the panel */
   lastSave: { ok: boolean; message: string; at: number } | null = null;
   private history: Snapshot[] = [];
@@ -135,9 +163,13 @@ export class Editor {
   private box: THREE.BoxHelper;
   private preview: THREE.Line;
   private dims: THREE.Sprite;
+  private markLine: THREE.Line;
+  private markFill: THREE.Mesh;
+  private lasso: { points: [number, number][]; last: THREE.Vector3 | null } | null = null;
   private group = new THREE.Group();
   private counter = 0;
   private lastHover = 0;
+  private swallowClick = false;
   private drag: { id: string; kind: 'structure' | 'build'; start: Structure | Feature; from: THREE.Vector3; moved: boolean } | null = null;
 
   constructor(private o: EditorOpts) {
@@ -157,7 +189,13 @@ export class Editor {
     this.dims = new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true, depthTest: false }));
     this.dims.visible = false;
     this.dims.renderOrder = 11;
-    this.group.add(this.halo, this.box, this.preview, this.dims);
+    this.markLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: '#f5c542', depthTest: false, transparent: true, opacity: 0.95 }));
+    this.markLine.visible = false;
+    this.markLine.renderOrder = 12;
+    this.markFill = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ color: '#f5c542', transparent: true, opacity: 0.16, depthWrite: false, side: THREE.DoubleSide }));
+    this.markFill.visible = false;
+    this.markFill.renderOrder = 11;
+    this.group.add(this.halo, this.box, this.preview, this.dims, this.markLine, this.markFill);
     o.scene.add(this.group);
     this.ray.params.Line = { threshold: 0.6 };
     this.wire();
@@ -490,6 +528,7 @@ export class Editor {
     d.addEventListener('pointermove', e => {
       if (!this.active) return;
       if (this.drag) { this.dragTo(e.clientX, e.clientY); return; }
+      if (this.lasso) { this.lassoTo(e.clientX, e.clientY); return; }
       const now = performance.now();
       if (now - this.lastHover < 60) return;         // the pick is not free; fifteen a second is plenty
       this.lastHover = now;
@@ -497,6 +536,12 @@ export class Editor {
       this.setHover(this.pick(e.clientX, e.clientY));
     });
     d.addEventListener('pointerdown', e => {
+      // the mark tool: press and draw round the ground to lasso it
+      if (this.active && e.button === 0 && this.tool === 'mark' && !this.drawing.length) {
+        const g = this.ground(this.rayAt(e.clientX, e.clientY).ray);
+        if (g) { const ll = this.o.frame.toLngLat(g.x, g.z); this.lasso = { points: [[ll.lng, ll.lat]], last: g }; d.setPointerCapture?.(e.pointerId); }
+        return;
+      }
       if (!this.active || e.button !== 0 || this.tool !== 'select' || this.moving || !this.o.caps().place) return;
       const p = this.pick(e.clientX, e.clientY);
       if (p && (p.kind === 'structure' || p.kind === 'build')) {
@@ -510,6 +555,14 @@ export class Editor {
       }
     });
     d.addEventListener('pointerup', () => {
+      if (this.lasso) {
+        const pts = this.lasso.points;
+        this.lasso = null;
+        this.preview.visible = false;
+        // a real lasso closes the mark; a press that barely moved is a click, and the click adds a corner
+        if (pts.length >= 6) { this.swallowClick = true; this.setMark(pts); }
+        return;
+      }
       if (!this.drag) return;
       const was = this.drag;
       this.drag = null;
@@ -520,6 +573,7 @@ export class Editor {
     });
     d.addEventListener('click', e => {
       if (!this.active || e.button !== 0) return;
+      if (this.swallowClick) { this.swallowClick = false; return; }
       this.click(e.clientX, e.clientY);
     });
     d.addEventListener('dblclick', e => { if (this.active && this.drawing.length >= 2) { e.preventDefault(); this.finishLine(); } });
@@ -543,6 +597,8 @@ export class Editor {
       else if (k === 'f') this.setTool('floor');
       else if (k === 'r') this.setTool('roof');
       else if (k === 'o') this.setTool('opening');
+      else if (k === 'k') this.setTool('organic');
+      else if (k === 'm') this.setTool('mark');
       else if ((k === '+' || k === '=') && this.selection?.kind === 'structure') this.raiseStructure(this.selection.id, 0.25);
       else if ((k === '-' || k === '_') && this.selection?.kind === 'structure') this.raiseStructure(this.selection.id, -0.25);
       else if (k === '1') this.setTool('select');
@@ -572,8 +628,15 @@ export class Editor {
       case 'tree': if (p.kind === 'ground') this.promptTree(p.lng, p.lat); break;
       case 'block': if (p.kind === 'ground' && this.o.caps().place) this.addBlock(p.lng, p.lat, this.block, this.o.player.state().headingDeg); break;
       case 'magic': if (p.kind === 'ground' && this.o.caps().magic) this.promptMagic(p.lng, p.lat); break;
-      case 'fence': case 'path': case 'road': case 'zone': case 'terrain':
+      case 'fence': case 'path': case 'road': case 'zone': case 'terrain': case 'mark':
         if (p.kind === 'ground') { this.drawing.push([p.lng, p.lat]); this.previewLine(null); this.o.onChange(this); }
+        break;
+      case 'organic':
+        if (!this.o.caps().place) break;
+        if (p.kind === 'ground' || p.kind === 'build' || p.kind === 'structure' || p.kind === 'building') {
+          const ll = this.o.frame.toLngLat(p.point.x, p.point.z);
+          this.drawing.push([ll.lng, ll.lat]); this.previewLine(null); this.o.onChange(this);
+        }
         break;
       case 'wall': case 'floor': case 'roof': {
         // construction draws on the grid: the point snaps to the half metre, and to the end of a wall near it
@@ -755,7 +818,7 @@ export class Editor {
   }
 
   /** the tool draws a ring rather than a line */
-  private get polygonal(): boolean { return this.tool === 'zone' || this.tool === 'terrain' || this.tool === 'floor' || this.tool === 'roof'; }
+  private get polygonal(): boolean { return this.tool === 'zone' || this.tool === 'terrain' || this.tool === 'floor' || this.tool === 'roof' || this.tool === 'organic' || this.tool === 'mark'; }
 
   private previewLine(cursor: THREE.Vector3 | null) {
     const pts = this.drawing.map(([lng, lat]) => {
@@ -778,7 +841,9 @@ export class Editor {
       if (this.tool === 'zone') {
         const name = (this.o.ask?.('Name this territory', this.zone.name || this.zone.kind) ?? window.prompt('Name this territory', this.zone.name || this.zone.kind))?.trim() || this.zone.kind;
         this.addZone(coords, name, this.zone.kind);
-      } else if (this.tool === 'floor') this.addFloor(coords, this.floor);
+      } else if (this.tool === 'organic') this.addOrganic(coords, this.organic, this.organicName);
+      else if (this.tool === 'mark') this.setMark(coords);
+      else if (this.tool === 'floor') this.addFloor(coords, this.floor);
       else if (this.tool === 'roof') this.addRoof(coords, this.roof);
       else this.addShaping(coords, this.shape.op, this.shape.height, this.shape.edge);
       return;
@@ -1209,6 +1274,353 @@ export class Editor {
     const obj = f ? this.o.build.group.getObjectByName(`build:${id}`) : null;
     if (f && obj) this.select({ kind: 'build', id, feature: f, object: obj, point: this.buildCentre(f) ?? new THREE.Vector3() });
     else this.select(null);
+  }
+
+  // ---- marking ground for the agent -----------------------------------------------------------------
+  /** the lasso follows the pointer across the ground, a point every three quarters of a metre */
+  private lassoTo(clientX: number, clientY: number) {
+    if (!this.lasso) return;
+    const g = this.ground(this.rayAt(clientX, clientY).ray);
+    if (!g) return;
+    if (this.lasso.last && Math.hypot(g.x - this.lasso.last.x, g.z - this.lasso.last.z) < 0.75) return;
+    const ll = this.o.frame.toLngLat(g.x, g.z);
+    this.lasso.points.push([ll.lng, ll.lat]);
+    this.lasso.last = g;
+    const keep = this.drawing;
+    this.drawing = this.lasso.points;
+    this.previewLine(null);
+    this.drawing = keep;
+  }
+
+  /**
+   * Mark a piece of ground: the ring is kept, drawn in gold, and every part of a building that has
+   * any of itself inside it is taken in — a wall, a floor, a roof, and the rest of the building
+   * each belongs to. The agent's panel opens on it.
+   */
+  setMark(coords: [number, number][]) {
+    const ring = coords.slice();
+    if (ring.length > 1 && ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1]) ring.pop();
+    if (ring.length < 3) return;
+    const xz = ring.map(([lng, lat]) => this.o.frame.toWorld(lng, lat));
+    let area = 0;
+    for (let i = 0, j = xz.length - 1; i < xz.length; j = i++) area += xz[j].x * xz[i].z - xz[i].x * xz[j].z;
+    const inside = (x: number, z: number) => {
+      let r = false;
+      for (let i = 0, j = xz.length - 1; i < xz.length; j = i++) { const a = xz[i], b = xz[j]; if ((a.z > z) !== (b.z > z) && x < ((b.x - a.x) * (z - a.z)) / (b.z - a.z) + a.x) r = !r; }
+      return r;
+    };
+    const picked = new Set<string>();
+    const structures = new Set<string>();
+    for (const f of this.o.pack()?.build.features ?? []) {
+      const coords2 = f.geometry.type === 'LineString' ? f.geometry.coordinates : f.geometry.type === 'Polygon' ? (f.geometry.coordinates[0] || []) : [];
+      // a part is in if any vertex, or any point along its edges, is inside the mark
+      let hit = false;
+      for (let i = 0; i < coords2.length && !hit; i++) {
+        const a = this.o.frame.toWorld(coords2[i][0], coords2[i][1]);
+        if (inside(a.x, a.z)) hit = true;
+        const nb = coords2[i + 1];
+        if (!hit && nb) { const b = this.o.frame.toWorld(nb[0], nb[1]); for (let t = 0.25; t < 1 && !hit; t += 0.25) if (inside(a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t)) hit = true; }
+      }
+      if (hit) { picked.add(String(f.properties.id)); if (f.properties.structure) structures.add(String(f.properties.structure)); }
+    }
+    for (const name of structures) for (const f of this.buildParts(name)) picked.add(String(f.properties.id));
+    this.mark = { ring, selected: [...picked], areaM2: Math.abs(area / 2) };
+    this.drawing = [];
+    this.preview.visible = false;
+    this.drawMark();
+    this.openMagic('mark');
+  }
+
+  /** after a building is grown on the mark, the mark takes in that building, so "higher" means it */
+  setMarkSelected(structure: string) {
+    if (!this.mark) return;
+    this.mark.selected = this.buildParts(structure).map(f => String(f.properties.id));
+    this.o.onChange(this);
+  }
+
+  clearMark() {
+    this.mark = null;
+    this.markLine.visible = false;
+    this.markFill.visible = false;
+    if (this.magicOpen === 'mark') this.magicOpen = null;
+    this.o.onChange(this);
+  }
+
+  /** the parts the mark took in, as they now stand */
+  markedParts(): Feature[] {
+    if (!this.mark) return [];
+    return this.mark.selected.map(id => this.buildFeature(id)).filter((f): f is Feature => !!f);
+  }
+
+  private drawMark() {
+    if (!this.mark) { this.markLine.visible = this.markFill.visible = false; return; }
+    const pts = this.mark.ring.map(([lng, lat]) => { const w = this.o.frame.toWorld(lng, lat); return new THREE.Vector3(w.x, this.o.field.atOr(lng, lat, 0) + 0.35, w.z); });
+    this.markLine.geometry.dispose();
+    this.markLine.geometry = new THREE.BufferGeometry().setFromPoints(pts.concat([pts[0].clone()]));
+    this.markLine.visible = true;
+    const shape = new THREE.Shape(pts.map(p => new THREE.Vector2(p.x, p.z)));
+    const geo = new THREE.ShapeGeometry(shape);
+    const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i), z = pos.getY(i);
+      const ll = this.o.frame.toLngLat(x, z);
+      pos.setXYZ(i, x, this.o.field.atOr(ll.lng, ll.lat, 0) + 0.3, z);
+    }
+    geo.computeVertexNormals();
+    this.markFill.geometry.dispose();
+    this.markFill.geometry = geo;
+    this.markFill.visible = true;
+  }
+
+  // ---- organic buildings ------------------------------------------------------------------------------
+  /**
+   * An organic building fitted inside a perimeter (lng/lat): a smooth plan, walls with a door and
+   * glass, a floor, a shell roof, and a level pad under it — one undo step. Returns the name it was
+   * given, or null when nothing fitted (and `lastOrganicWhy` says why).
+   */
+  addOrganic(coords: [number, number][], specIn: Partial<OrganicSpec>, name = ''): string | null {
+    const ring = coords.slice();
+    if (ring.length > 1 && ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1]) ring.pop();
+    if (ring.length < 3) return null;
+    const spec = cleanSpec(specIn);
+    const title = (name || '').trim().slice(0, 60) || this.nextOrganicName();
+    const parts = this.organicParts(ring, spec, title, null);
+    if (!parts) return null;
+    this.commitBuild(parts, String(parts.find(f => f.properties.kind === 'wall')?.properties.id ?? parts[0].properties.id));
+    return title;
+  }
+
+  private nextOrganicName(): string {
+    const have = new Set((this.o.pack()?.build.features ?? []).map(f => String(f.properties.structure ?? '')));
+    for (let i = 1; ; i++) { const n = `bio form ${i}`; if (!have.has(n)) return n; }
+  }
+
+  /** the spec an organic building was made from, and its floor, by the building's name */
+  organicOf(structure: string): { spec: OrganicSpec; perimeter: [number, number][]; floor: Feature } | null {
+    const floor = this.buildParts(structure).find(f => f.properties.kind === 'floor' && f.properties.organic && typeof f.properties.organic === 'object');
+    if (!floor) return null;
+    const o = floor.properties.organic as Record<string, unknown>;
+    const per = Array.isArray(o.perimeter) ? (o.perimeter as [number, number][]).filter(c => Array.isArray(c) && isFinite(c[0]) && isFinite(c[1])) : [];
+    if (per.length < 3) return null;
+    return { spec: cleanSpec(o), perimeter: per, floor };
+  }
+
+  /** how many recorded trees stand inside a building's floor — oaks are protected here, so this is a warning, never an automatic clearing */
+  treesInside(structure: string): number {
+    const floor = this.buildParts(structure).find(f => f.properties.kind === 'floor');
+    const pack = this.o.pack();
+    if (!floor || floor.geometry.type !== 'Polygon' || !pack) return 0;
+    const ring = (floor.geometry.coordinates[0] || []).map(([lng, lat]) => this.o.frame.toWorld(lng, lat));
+    const inside = (x: number, z: number) => { let r = false; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const a = ring[i], b = ring[j]; if ((a.z > z) !== (b.z > z) && x < ((b.x - a.x) * (z - a.z)) / (b.z - a.z) + a.x) r = !r; } return r; };
+    return pack.trees.filter(t => { const w = this.o.frame.toWorld(t.lng, t.lat); return inside(w.x, w.z); }).length;
+  }
+
+  /** what an organic building takes, worked out again from its own spec (so it is always this building's) */
+  organicQuantities(structure: string): Quantities | null {
+    const o = this.organicOf(structure);
+    if (!o) return null;
+    const plan = organicPlan(o.perimeter.map(([lng, lat]) => this.o.frame.toWorld(lng, lat)), o.spec);
+    return plan.ok ? plan.quantities : null;
+  }
+
+  /**
+   * Grow an organic building again with some of its numbers changed — the sliders. The parts keep
+   * their ids, so this is a change to the same building, one undo step, not a new one beside it.
+   */
+  regenerateOrganic(structure: string, patch: Partial<OrganicSpec>): boolean {
+    const was = this.organicOf(structure);
+    if (!was) return false;
+    const spec = cleanSpec({ ...was.spec, ...patch });
+    const old = this.buildParts(structure);
+    const ids = {
+      floor: String(was.floor.properties.id),
+      wall: String(old.find(f => f.properties.kind === 'wall')?.properties.id ?? ''),
+      roof: String(old.find(f => f.properties.kind === 'roof')?.properties.id ?? ''),
+      pad: String((was.floor.properties.organic as Record<string, unknown>).pad_id ?? '')
+    };
+    const parts = this.organicParts(was.perimeter, spec, structure, ids);
+    if (!parts) return false;
+    this.snapshot();
+    const keepIds = new Set(parts.map(f => String(f.properties.id)));
+    // anything of the building the new version no longer has (a pad switched off) is dropped
+    const dropped = new Set([ids.floor, ids.wall, ids.roof, ids.pad].filter(id => id && !keepIds.has(id)));
+    this.edits = this.edits.filter(x => !dropped.has(String(x.properties.id)));
+    for (const next of parts) {
+      next.properties.reported = new Date().toISOString().slice(0, 10);
+      const at = this.edits.findIndex(x => String(x.properties.id) === String(next.properties.id) && x.properties.op === 'add');
+      if (at >= 0) this.edits[at] = next; else this.edits.push(next);
+    }
+    this.persist();
+    this.redraw();
+    this.selectBuild(ids.wall || String(parts[0].properties.id));
+    this.o.onChange(this);
+    return true;
+  }
+
+  /** the features of an organic building, with fresh ids or the ones given */
+  private organicParts(ring: [number, number][], spec: OrganicSpec, name: string, ids: { floor: string; wall: string; roof: string; pad: string } | null): Feature[] | null {
+    const xz = ring.map(([lng, lat]) => this.o.frame.toWorld(lng, lat));
+    const plan = organicPlan(xz, spec);
+    this.lastQuantities = plan.ok ? plan.quantities : null;
+    this.lastOrganicWhy = plan.ok ? null : plan.why ?? 'it did not fit';
+    if (!plan.ok) { this.said(false, `no building: ${this.lastOrganicWhy}`); return null; }
+    const ll = (pts: { x: number; z: number }[]) => pts.map(p => { const q = this.o.frame.toLngLat(p.x, p.z); return [q.lng, q.lat] as [number, number]; });
+    const withId = (props: Record<string, unknown>, id: string | undefined) => { const st = this.stamp(props); if (id) st.id = id; return st; };
+    const assembly = { structure: spec.structure, infill: spec.infill, insulation: spec.insulation };
+    const out: Feature[] = [];
+    let padId = '';
+    if (spec.pad) {
+      const pad: Feature = { type: 'Feature', properties: withId({ op: 'add', layer: 'terrain', terrain_op: 'flatten', edge_m: 3, structure: name }, ids?.pad || undefined), geometry: { type: 'Polygon', coordinates: [ll(plan.pad)] } };
+      padId = String(pad.properties.id);
+      out.push(pad);
+    }
+    const perimeter = ring.concat([ring[0]]).map(c => [+c[0].toFixed(7), +c[1].toFixed(7)]);
+    const floor: Feature = { type: 'Feature', properties: withId({ op: 'add', layer: 'build', kind: 'floor', level_m: 0, thick_m: 0.3, material: this.material(spec.floor, 'earth'), structure: name,
+      organic: { ...spec, perimeter, pad_id: padId || undefined } }, ids?.floor || undefined), geometry: { type: 'Polygon', coordinates: [ll(plan.floor)] } };
+    const wall: Feature = { type: 'Feature', properties: withId({ op: 'add', layer: 'build', kind: 'wall', height_m: spec.height, thick_m: spec.thick, material: this.material(spec.infill, 'cob'), smooth: true,
+      openings: plan.openings, structure: name, assembly }, ids?.wall || undefined), geometry: { type: 'LineString', coordinates: ll(plan.wall) } };
+    const roof: Feature = { type: 'Feature', properties: withId({ op: 'add', layer: 'build', kind: 'roof', form: 'shell', eaves_m: spec.height, pitch_deg: 20, rise_m: spec.rise, overhang_m: spec.overhang,
+      material: roofMaterialFor(spec.roof), finish: spec.roof, solar_ratio: spec.solar, solar_facing_deg: 180, structure: name,
+      assembly: { roof_structure: spec.structure, insulation: spec.insulation } }, ids?.roof || undefined), geometry: { type: 'Polygon', coordinates: [ll(plan.roof)] } };
+    out.push(floor, wall, roof);
+    return out;
+  }
+
+  // ---- changing parts that are already there ------------------------------------------------------------
+  /**
+   * Apply one change to several parts at once — the agent's "make these walls higher, curve them to
+   * the right and add a window". `right` is the viewer's right on the ground (x, z), so "right" means
+   * what the person looking at it means by right. One undo step for the lot.
+   */
+  modifyParts(ids: string[], m: ModifySpec, right: { x: number; z: number } = { x: 1, z: 0 }): number {
+    const list = ids.map(id => this.buildFeature(id)).filter((f): f is Feature => !!f);
+    if (!list.length) return 0;
+    const nexts: Feature[] = [];
+    for (const f of list) {
+      const next: Feature = JSON.parse(JSON.stringify(f));
+      const p = next.properties;
+      const kind = String(p.kind);
+      if (kind === 'wall' && next.geometry.type === 'LineString') {
+        let h = Number(p.height_m || 2.7);
+        if (m.height_m != null && isFinite(m.height_m)) h = m.height_m;
+        if (m.height_delta_m != null && isFinite(m.height_delta_m)) h += m.height_delta_m;
+        h = Math.min(12, Math.max(0.3, h));
+        p.height_m = +h.toFixed(2);
+        if (m.thick_m != null && isFinite(m.thick_m)) p.thick_m = Math.min(1.5, Math.max(0.05, m.thick_m));
+        if (m.material && MATERIALS[m.material]) p.material = m.material;
+        if (m.smooth != null) { if (m.smooth) p.smooth = true; else delete p.smooth; }
+        if (m.bulge_m && isFinite(m.bulge_m)) this.bulgeWall(next, m.bulge_m, m.bulge_dir ?? 'out', right);
+        // openings keep inside the wall's new height
+        const ops = (Array.isArray(p.openings) ? p.openings : []) as Opening[];
+        for (const o of ops) { o.head_m = Math.min(o.head_m, +(h - 0.1).toFixed(2)); if (o.kind === 'window' && o.sill_m > o.head_m - 0.3) o.sill_m = Math.max(0.05, +(o.head_m - 0.6).toFixed(2)); }
+        p.openings = ops.filter(o => o.head_m > o.sill_m + 0.25);
+        const L = this.wallAlong(next)?.total ?? 0;
+        if (m.add_windows && m.add_windows > 0 && L > 1) {
+          const w = Math.min(4, Math.max(0.5, m.window_width_m ?? 1.2));
+          const sill = Math.max(0.05, m.window_sill_m ?? 0.8), head = Math.min(h - 0.2, Math.max(sill + 0.4, m.window_head_m ?? Math.min(2.2, h - 0.3)));
+          const n = Math.min(12, Math.round(m.add_windows));
+          const opsNow = p.openings as Opening[];
+          // spread evenly, then nudge each clear of what is already there
+          for (let k = 0; k < n; k++) {
+            let at = (L * (k + 1)) / (n + 1);
+            for (let tries = 0; tries < 20 && opsNow.some(o => Math.abs(o.at_m - at) < (o.width_m + w) / 2 + 0.2); tries++) at += (tries % 2 ? -1 : 1) * (tries + 1) * 0.3;
+            if (at < w / 2 + 0.1 || at > L - w / 2 - 0.1 || opsNow.some(o => Math.abs(o.at_m - at) < (o.width_m + w) / 2 + 0.1)) continue;
+            opsNow.push({ kind: 'window', at_m: +at.toFixed(2), width_m: w, sill_m: +sill.toFixed(2), head_m: +head.toFixed(2) });
+          }
+          opsNow.sort((a, b) => a.at_m - b.at_m);
+        }
+        if (m.add_door && L > 1.2) {
+          const opsNow = p.openings as Opening[];
+          let at = L / 2;
+          for (let tries = 0; tries < 20 && opsNow.some(o => Math.abs(o.at_m - at) < (o.width_m + 1) / 2 + 0.2); tries++) at += (tries % 2 ? -1 : 1) * (tries + 1) * 0.3;
+          if (!opsNow.some(o => Math.abs(o.at_m - at) < (o.width_m + 1) / 2 + 0.1)) opsNow.push({ kind: 'door', at_m: +at.toFixed(2), width_m: 1, sill_m: 0, head_m: +Math.min(2.2, h - 0.1).toFixed(2) });
+          opsNow.sort((a, b) => a.at_m - b.at_m);
+        }
+      } else if (kind === 'roof') {
+        if (m.rise_delta_m && isFinite(m.rise_delta_m)) {
+          if (p.form === 'shell') p.rise_m = +Math.min(12, Math.max(0.2, Number(p.rise_m ?? 2.2) + m.rise_delta_m)).toFixed(2);
+          else p.pitch_deg = Math.min(60, Math.max(0, Number(p.pitch_deg ?? 25) + m.rise_delta_m * 8));
+        }
+        const eavesD = m.eaves_delta_m ?? m.height_delta_m;
+        if (eavesD && isFinite(eavesD)) p.eaves_m = +Math.min(30, Math.max(0.5, Number(p.eaves_m ?? 3) + eavesD)).toFixed(2);
+        if (m.height_m != null && isFinite(m.height_m)) p.eaves_m = Math.min(30, Math.max(0.5, m.height_m));
+        if (m.roof_finish) { p.finish = m.roof_finish; p.material = roofMaterialFor(m.roof_finish); }
+      } else if (kind === 'floor') {
+        if (m.material && MATERIALS[m.material] && !m.roof_finish) { /* a wall material is not a floor's */ }
+      }
+      nexts.push(next);
+    }
+    this.snapshot();
+    const today = new Date().toISOString().slice(0, 10);
+    for (const next of nexts) {
+      next.properties.reported = today;
+      const at = this.edits.findIndex(x => String(x.properties.id) === String(next.properties.id) && x.properties.op === 'add');
+      if (at >= 0) this.edits[at] = next; else this.edits.push(next);
+    }
+    this.persist();
+    this.redraw();
+    this.selectBuild(String(nexts[0].properties.id));
+    if (this.mark) this.drawMark();
+    this.o.onChange(this);
+    return nexts.length;
+  }
+
+  /**
+   * Bow a wall: its middle moves `by` metres to one side and the ends stay put, along a smooth arc.
+   * A closed wall (a room) bows on the side facing the way asked; an open one along its length.
+   */
+  private bulgeWall(f: Feature, by: number, dir: 'left' | 'right' | 'out' | 'in', right: { x: number; z: number }) {
+    if (f.geometry.type !== 'LineString') return;
+    const coords = f.geometry.coordinates;
+    const pts = coords.map(([lng, lat]) => this.o.frame.toWorld(lng, lat));
+    const closed = pts.length > 3 && Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].z - pts[pts.length - 1].z) < 1e-3;
+    // the building's middle, for out and in
+    let cx = 0, cz = 0;
+    const st = f.properties.structure ? this.buildParts(String(f.properties.structure)) : [f];
+    let n = 0;
+    for (const g of st) {
+      const cs = g.geometry.type === 'LineString' ? g.geometry.coordinates : g.geometry.type === 'Polygon' ? g.geometry.coordinates[0] : [];
+      for (const c of cs) { const w = this.o.frame.toWorld(c[0], c[1]); cx += w.x; cz += w.z; n++; }
+    }
+    if (n) { cx /= n; cz /= n; }
+    if (closed) {
+      // push the side of the ring that faces the chosen way out along it, fading to nothing at the sides
+      const ring = pts.slice(0, -1);
+      let mx = 0, mz = 0; for (const q of ring) { mx += q.x / ring.length; mz += q.z / ring.length; }
+      const d = dir === 'right' ? right : dir === 'left' ? { x: -right.x, z: -right.z } : { x: 0, z: 0 };
+      const moved = ring.map(q => {
+        const rx = q.x - mx, rz = q.z - mz, rl = Math.hypot(rx, rz) || 1;
+        if (dir === 'out' || dir === 'in') { const k = (dir === 'out' ? 1 : -1) * by / rl; return { x: q.x + rx * k, z: q.z + rz * k }; }
+        const facing = Math.max(0, (rx * d.x + rz * d.z) / rl);
+        const k = by * facing * facing;
+        return { x: q.x + d.x * k, z: q.z + d.z * k };
+      });
+      moved.push({ ...moved[0] });
+      f.geometry.coordinates = moved.map(q => { const ll = this.o.frame.toLngLat(q.x, q.z); return [ll.lng, ll.lat]; });
+      f.properties.smooth = true;
+      return;
+    }
+    // an open wall: resample to nine points so a straight wall has somewhere to bend, then bow it
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z));
+    const L = cum[cum.length - 1];
+    if (L < 0.5) return;
+    const at = (s: number) => { let i = 0; while (i < cum.length - 2 && cum[i + 1] < s) i++; const t = (s - cum[i]) / ((cum[i + 1] - cum[i]) || 1); return { x: pts[i].x + (pts[i + 1].x - pts[i].x) * t, z: pts[i].z + (pts[i + 1].z - pts[i].z) * t }; };
+    const K = pts.length >= 9 ? pts.length - 1 : 8;
+    const a = pts[0], b = pts[pts.length - 1];
+    let nx = -(b.z - a.z), nz = b.x - a.x;
+    const nl = Math.hypot(nx, nz) || 1; nx /= nl; nz /= nl;
+    const mid = at(L / 2);
+    const want = dir === 'right' ? right : dir === 'left' ? { x: -right.x, z: -right.z } : { x: (mid.x - cx) * (dir === 'out' ? 1 : -1), z: (mid.z - cz) * (dir === 'out' ? 1 : -1) };
+    if (nx * want.x + nz * want.z < 0) { nx = -nx; nz = -nz; }
+    const out: [number, number][] = [];
+    for (let k = 0; k <= K; k++) {
+      const s = (k / K) * L, q = at(s), off = by * Math.sin((Math.PI * s) / L);
+      const ll = this.o.frame.toLngLat(q.x + nx * off, q.z + nz * off);
+      out.push([ll.lng, ll.lat]);
+    }
+    f.geometry.coordinates = out;
+    f.properties.smooth = true;
   }
 
   // ---- keeping and saving ----------------------------------------------------------------------
