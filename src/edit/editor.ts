@@ -77,6 +77,12 @@ export interface EditorOpts {
   structuresBase: () => Structure[];
   /** what the current role may do */
   caps: () => Caps;
+  /**
+   * Asked when someone reaches for the tools without the role for them. Resolves true if they now
+   * have it. Without this the editor can only refuse, and a refusal with no way forward is how the
+   * tools came to look as if they did not exist.
+   */
+  onNeedRole?: () => Promise<boolean>;
   /** apply the unsaved edits and structure changes on top of what is known and redraw */
   rebuild: (edits: Feature[], structures: StructureChange[]) => void;
   /** the atlas origin — the save endpoint lives there */
@@ -190,7 +196,11 @@ export class Editor {
 
   setActive(on: boolean) {
     if (on === this.active) return;
-    if (on && !this.o.caps().edit) { this.said(false, 'editing needs a builder or admin PIN'); return; }
+    if (on && !this.o.caps().edit) {
+      if (this.o.onNeedRole) { void this.o.onNeedRole().then(ok => { if (ok) this.setActive(true); }); return; }
+      this.said(false, 'editing needs a builder or admin PIN');
+      return;
+    }
     this.active = on;
     this.o.player.editing = on;
     this.o.dom.style.cursor = on ? 'crosshair' : '';

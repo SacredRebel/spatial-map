@@ -29,6 +29,7 @@ import { instantAt } from './world/sun';
 import { Structures } from './world/structures';
 import { solidsFrom, inRing } from './world/collide';
 import { loadPack, applyEdits, type PackData, type Feature } from './world/pack';
+import { footingsFor, type Footings } from './world/footings';
 import { Today, type TodayTiles } from './world/today';
 import { Build } from './world/build';
 import { loadGrain, loadTile } from './world/grain';
@@ -187,8 +188,32 @@ const build = new Build(frame, field);
  */
 let walkSig = '';
 let replantAfterWalk: ReturnType<typeof setTimeout> | null = null;
+/**
+ * Footings under every placed model: nothing stands on air.
+ *
+ *   A model is set down by one height and the hillside is not flat, so floors hang over falling
+ *   ground. The footings draw the foundation wall that placement implies, and where the drop is more
+ *   than a step they are also a wall to walk into — nobody walks under the house. Rebuilt whenever
+ *   the models' floors change, because a house moved in the editor needs different walls.
+ */
+const footGroup = new THREE.Group();
+footGroup.name = 'footings';
+let footing: Footings | null = null;
+function rebuildFootings() {
+  if (footing?.mesh) {
+    footGroup.remove(footing.mesh);
+    footing.mesh.geometry.dispose();
+    (footing.mesh.material as THREE.Material).dispose();
+  }
+  footing = footingsFor(structures.platforms, {
+    ground: (x, z) => { const ll = frame.toLngLat(x, z); const h = field.atOr(ll.lng, ll.lat, NaN); return isFinite(h) ? h : null; }
+  });
+  if (footing.mesh) footGroup.add(footing.mesh);
+}
+
 function refreshWalk() {
-  player.solids = solidsFrom(structures.list, frame, field, pid).concat(today.solids, build.solids, structures.solids);
+  rebuildFootings();
+  player.solids = solidsFrom(structures.list, frame, field, pid).concat(today.solids, build.solids, structures.solids, footing?.solids ?? []);
   player.platforms = build.platforms.concat(structures.platforms);
 
   const sig = `${structures.platforms.length}:${structures.solids.length}`;
@@ -240,7 +265,7 @@ if (roleParam === 'builder' || roleParam === 'admin') session = { role: rolePara
 const caps = () => CAPS[session.role];
 const grid = new GroundGrid(frame, field);
 
-scene.add(terrain.group, vegetation.group, structures.group, today.group, build.group, player.object, grid.group);
+scene.add(terrain.group, vegetation.group, structures.group, today.group, build.group, player.object, grid.group, footGroup);
 sky.addTo(scene);
 
 // the clock is the community's own wall time, not the viewer's: a shadow at half past two means
@@ -274,6 +299,7 @@ const editor = new Editor({
   pid: () => pid,
   structuresBase: () => structuresBase,
   caps,
+  onNeedRole: async () => { if (!caps().edit) await signIn(); return caps().edit; },
   rebuild: (edits, changes) => rebuild(edits, changes),
   onChange: () => { panel.render(); magic.open(editor.magicOpen); hud.setMode(player.mode === 'fly', editor.active); }
 });
@@ -298,8 +324,18 @@ async function signIn() {
     editor.refresh();
     return;
   }
-  const pin = window.prompt('Your PIN — a builder proposes, an admin decides.\n\nLeave it blank to take the tools for this browser only.');
+  const pin = window.prompt('Build here.\n\nPress OK with the box empty to use the building tools in this browser.\nEnter your PIN as well if you want to save to the atlas.');
   if (pin === null) return;
+  // Empty is a choice already made, in the sentence above: take the tools here. Asking again in a
+  // second dialog was one more door between a person and the thing they came for.
+  if (!pin.trim()) {
+    session = { role: 'builder', pin: null };
+    saveSession(session);
+    hud.setRole(session.role, caps().edit);
+    hud.setNotice('builder for this browser — draw, place and shape freely. Saving to the atlas still needs a PIN.');
+    editor.refresh();
+    return;
+  }
   // A blank PIN, or one the atlas does not know, is the common case and it used to be a dead end:
   // an alert, and a world you could only look at. The tools themselves were never the secret —
   // saving is. So offer them locally and say exactly what that does and does not buy.
@@ -687,12 +723,14 @@ const studio = new Studio({
   }
 });
 async function openStudio() {
-  if (!caps().edit) return;
+  if (!caps().edit) { await signIn(); if (!caps().edit) return; }
   studioRef = await refGlbOf(designRow());
   studio.open();
 }
 
 const api = {
+  /** the foundation walls the placements imply: the tallest, which floor, and how much wall in all */
+  footings: () => footing ? { maxDrop: footing.maxDrop, worst: footing.worst, edges: footing.edges, lengthM: footing.lengthM, solids: footing.solids.length, drawn: !!footing.mesh, byStructure: footing.byStructure } : null,
   THREE, player, frame, field, terrain, vegetation, structures, today, build, sky, scene, camera, renderer, stick, editor, grid, inspect, magic, studio, looks,
   get ready() { return ready; },
   get pack() { return pack; },

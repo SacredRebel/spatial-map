@@ -576,12 +576,18 @@ check('fly: landing drops the body onto the surface under it',
 // Stand 15 m south of a known tree, facing it. Its canopy projected to the screen must pick that
 // tree and no other; the ground picked at the screen's centre must be on the surface.
 // ---- roles ------------------------------------------------------------------------------------------
-// A member walks and reads; the pencil needs a builder or admin PIN, and the atlas says which.
+// A member walks and reads; the pencil needs the role, and the atlas says which a PIN buys. The way
+// in is always offered now — but reaching for the pencil ASKS, and saying no leaves you a member.
 const roles = await page.evaluate(async () => {
   const w = window.world, ed = w.editor;
   const member = w.session.role;
+  const prompt = window.prompt;
+  let asked = 0;
+  window.prompt = () => { asked++; return null; };        // they are asked, and they cancel
   ed.setActive(true);
-  const refused = { active: ed.active, editing: w.player.editing, said: ed.lastSave?.message, editButton: document.querySelector('[data-el="edit"]').hidden };
+  await new Promise(r => setTimeout(r, 200));
+  window.prompt = prompt;
+  const refused = { asked, role: w.session.role, active: ed.active, editing: w.player.editing, editButton: document.querySelector('[data-el="edit"]').textContent.trim() };
   const r = await fetch(`${w.state().atlas}/api/pack/role`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin: '0000' }) });
   const wrong = r.status;
   const r2 = await fetch(`${w.state().atlas}/api/pack/role`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin: '2424' }) });
@@ -589,8 +595,8 @@ const roles = await page.evaluate(async () => {
   w.setSession({ role: 'admin', pin: '4242' });
   return { member, refused, wrong, builder, roleButton: document.querySelector('[data-el="role"]').textContent, editButton: document.querySelector('[data-el="edit"]').hidden };
 });
-check('roles: a member cannot pick up the pencil — B does nothing and the edit button is not offered',
-  roles.member === 'member' && !roles.refused.active && !roles.refused.editing && /PIN/.test(roles.refused.said || '') && roles.refused.editButton === true, roles.refused);
+check('roles: a member cannot pick up the pencil without being asked — cancelling leaves them a member, tools off',
+  roles.member === 'member' && roles.refused.asked === 1 && roles.refused.role === 'member' && !roles.refused.active && !roles.refused.editing && /build/.test(roles.refused.editButton), roles.refused);
 check('roles: the atlas turns a PIN into a role, and a role into the buttons', roles.wrong === 401 && roles.builder === 'builder' && /admin/.test(roles.roleButton) && roles.editButton === false, { wrong: roles.wrong, builder: roles.builder, button: roles.roleButton });
 
 // ---- the studio -------------------------------------------------------------------------------------
@@ -1218,6 +1224,46 @@ check('model: taken away again, the house stands and nothing of the model is lef
 check('vegetation: nothing grows through a wall a MODEL brought, including one standing outside the ground its outline clears',
   entered.walls.exposed > 0 && entered.walls.through === 0, entered.walls);
 
+// ---- nothing stands on air -----------------------------------------------------------------------
+// A model is set down by one height and a hillside is not flat, so floors came to hang over falling
+// ground with daylight underneath — the Oak Leaf hung off its knoll. Footings draw the foundation wall
+// a placement implies. Raise the fixture house two and a half metres and three things must hold: a wall
+// appears under it about that tall, a walker on the ground cannot go underneath, and a walker on the
+// slab is not stopped by it. Then take the house away and the wall goes with it.
+const footed = await page.evaluate(async ({ pos, outline }) => {
+  const w = window.world, p = w.player;
+  const LIFT = 2.5;
+  w.rebuild([], [{ id: 'fixture-house', pid: 'fixture', mode: 'vision', name: 'a house on stilts', status: 'model',
+    model: '/models/fixture-house.glb', position: pos, altitudeM: LIFT, rotationDeg: 0, scale: 1, outline, enter: true }]);
+  for (let i = 0; i < 100 && !w.structures.platforms.length; i++) await new Promise(r => setTimeout(r, 100));
+  await new Promise(r => setTimeout(r, 300));
+  const report = w.footings();
+  const slabTop = w.structures.platforms.find(f => f.id === 'fixture-house:slab')?.top ?? NaN;
+  // from 9 m east at ground level, walk west at the house: something must stop the body at the slab's east face
+  w.goto(pos[0] + 9 / (110540 * Math.cos(pos[1] * Math.PI / 180)), pos[1] + 1 / 110540, 270);
+  p.key('w', true); for (let i = 0; i < 8; i++) p.update(0.5); p.key('w', false);
+  const st = p.state();
+  const under = { eastM: (st.lng - pos[0]) * 110540 * Math.cos(pos[1] * Math.PI / 180), touching: st.touching || '', groundM: st.groundM };
+  // stand on the slab itself and walk a little: the footing below must not stop you
+  p.placeAt(pos[0], pos[1] + 1 / 110540, 90);   // placeAt drops to the terrain; lift the body onto the slab
+  p.position.y = slabTop + 0.05;
+  p.update(0.1); p.update(0.1);
+  const onTop = { groundM: p.state().groundM, slabTop };
+  p.key('w', true); for (let i = 0; i < 2; i++) p.update(0.25); p.key('w', false);
+  onTop.touching = p.state().touching || '';
+  w.rebuild([], []);
+  await new Promise(r => setTimeout(r, 300));
+  return { report, under, onTop, after: w.footings() };
+}, { pos: at(70, 0), outline: [at(66, -3), at(74, -3), at(74, 3), at(66, 3), at(66, -3)] });
+check('footings: a floor raised off the ground gets a foundation wall about as tall as the gap',
+  footed.report && footed.report.drawn && footed.report.maxDrop > 2.4 && footed.report.maxDrop < 3.6 && footed.report.solids > 0, footed.report);
+check('footings: a walker on the ground cannot go under the raised house — the footing stops them at its face',
+  /:footing:/.test(footed.under.touching) && footed.under.eastM > 3.5, footed.under);
+check('footings: a walker standing on the floor is not stopped by the wall beneath it',
+  Math.abs(footed.onTop.groundM - footed.onTop.slabTop) < 0.05 && !/:footing:/.test(footed.onTop.touching), footed.onTop);
+check('footings: take the house away and its footing goes with it',
+  footed.after && footed.after.maxDrop === 0 && !footed.after.drawn, footed.after);
+
 // ---- when the fine ground does not answer ------------------------------------------------------------
 // The atlas is down, or unreachable from where the person is: the world must still open. It falls
 // back to the coarse global set, says so in a notice, and stands the player on that ground.
@@ -1285,6 +1331,32 @@ const pencil = await page.evaluate(async () => {
 });
 check('pencil: a blank PIN offers the tools for this browser, and says saving still needs one',
   pencil.role === 'builder' && pencil.pin === null && /Saving to the atlas still needs a PIN/.test(pencil.notice), pencil);
+
+// ---- the way in is on screen ------------------------------------------------------------------------
+// The editor, the magic box and the studio were all built and all invisible: a member saw a badge
+// saying "member" and nothing else, and B answered with a refusal. So a member now sees "build", and
+// pressing it (or B) asks once and goes straight in.
+const wayIn = await page.evaluate(async () => {
+  const w = window.world;
+  w.editor.setActive(false);
+  w.setSession({ role: 'member', pin: null });
+  const btn = document.querySelector('[data-el="edit"]');
+  const seen = { hidden: btn.hidden, label: btn.textContent.trim(), studio: !document.querySelector('[data-el="studio"]').hidden };
+  const prompt = window.prompt, confirm = window.confirm;
+  let confirms = 0;
+  window.prompt = () => '';
+  window.confirm = () => { confirms++; return true; };
+  btn.click();
+  await new Promise(r => setTimeout(r, 400));
+  window.prompt = prompt; window.confirm = confirm;
+  const got = { role: w.session.role, editing: w.player.editing, label: btn.textContent.trim(), confirms };
+  w.editor.setActive(false);
+  return { seen, got };
+});
+check('build: a member sees a "build" button, and the studio, instead of nothing',
+  !wayIn.seen.hidden && /build/.test(wayIn.seen.label) && wayIn.seen.studio, wayIn.seen);
+check('build: pressing it with an empty PIN goes straight into the tools — one question, no second dialog',
+  wayIn.got.role === 'builder' && wayIn.got.editing === true && wayIn.got.confirms === 0 && /edit/.test(wayIn.got.label), wayIn.got);
 await page.evaluate(() => window.world.setSession({ role: 'admin', pin: '4242' }));
 
 // ---- how the light lands -------------------------------------------------------------------------

@@ -58,8 +58,8 @@ export class Hud {
           <button class="btn" data-act="char" data-el="char" title="the character: body, camera, controls">🧍 character</button>
           <button class="btn" data-act="view" title="first / third person (C)">👤 view</button>
           <button class="btn" data-act="fly" data-el="fly" title="fly / walk (G)">🕊 fly</button>
-          <button class="btn" data-act="edit" data-el="edit" title="edit the world (B)">✎ edit</button>
-          <button class="btn" data-act="studio" data-el="studio" title="design the house in the studio" hidden>🏗 studio</button>
+          <button class="btn" data-act="edit" data-el="edit" title="build: take the tools (B)">🛠 build</button>
+          <button class="btn" data-act="studio" data-el="studio" title="design the house in the studio">🏗 studio</button>
           <button class="btn" data-act="role" data-el="role" title="who you are here">◌ member</button>
           <button class="btn" data-act="recentre" title="back to the start">⌖ recentre</button>
         </div>
@@ -203,8 +203,14 @@ export class Hud {
     b.textContent = role === 'admin' ? '◆ admin' : role === 'builder' ? '◇ builder' : '◌ member';
     b.classList.toggle('on', role !== 'member');
     b.title = role === 'member' ? 'enter a PIN to build or administer' : `${role} · click to sign out`;
-    this.q('[data-el="edit"]').hidden = !canEdit;
-    this.q('[data-el="studio"]').hidden = !canEdit;
+    // The way into the tools is always on screen. It used to be hidden until you already had the
+    // role, behind a badge that said "member" — so the editor, the magic box and the studio looked as
+    // if they did not exist. A member now sees "build"; pressing it asks for the role and goes in.
+    const e = this.q('[data-el="edit"]');
+    e.hidden = false;
+    e.textContent = canEdit ? '✎ edit' : '🛠 build';
+    e.title = canEdit ? 'edit the world (B)' : 'build: take the tools (B)';
+    this.q('[data-el="studio"]').hidden = false;
   }
 
   /** light up the fly and edit buttons when they are on, and say what the keys do now */
