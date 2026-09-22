@@ -10,6 +10,7 @@
 //   record's tiles are never rewritten.
 
 import type { Feature } from './pack';
+import { metresPerDegree } from './geo';
 
 export interface Shaping {
   id: string;
@@ -26,7 +27,6 @@ export interface Shaping {
   mx: number; my: number;
 }
 
-const D2R = Math.PI / 180;
 
 /** an edit feature into a shaping, or null when it is not one */
 export function shapingFrom(f: Feature, groundAt: (lng: number, lat: number) => number | null): Shaping | null {
@@ -37,7 +37,7 @@ export function shapingFrom(f: Feature, groundAt: (lng: number, lat: number) => 
   const op = f.properties.terrain_op === 'raise' || f.properties.terrain_op === 'lower' ? f.properties.terrain_op : 'flatten';
   const edge = Math.min(40, Math.max(0, Number(f.properties.edge_m ?? 3)));
   const lat0 = ring.reduce((a, p) => a + p[1], 0) / ring.length;
-  const mx = 111320 * Math.cos(lat0 * D2R), my = 110574;
+  const { mx, my } = metresPerDegree(lat0);
   let height: number;
   if (op === 'flatten') {
     if (isFinite(Number(f.properties.to_m))) height = Number(f.properties.to_m);

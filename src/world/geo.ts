@@ -7,15 +7,49 @@
 //   camera and the models all speak the same unit as the tape measure.
 //
 //   three.js is Y-up and looks down -Z, so: x = east, y = up, z = -north.
+//
+//   The metres are TRUE metres. Until v0.16 a degree of latitude was taken as the equator's radius
+//   times π/180 (111,319 m), the sphere's answer; on the WGS84 ellipsoid at Sulphur Mountain it is
+//   110,930 m. That stretched everything 0.35% north–south, 1.3 ft on a 378 ft survey line. Now the
+//   two radii of the ellipsoid at the origin are used, and the surveyor's eleven boundary calls
+//   come back within 0.07 ft (see tests/measure.test.mjs, which checks them all).
 
 export const EARTH_R = 6378137;
+/** WGS84: semi-major axis, flattening, first eccentricity squared */
+export const WGS84 = { a: 6378137, f: 1 / 298.257223563, e2: (1 / 298.257223563) * (2 - 1 / 298.257223563) };
 const D2R = Math.PI / 180;
 
 export interface LngLat { lng: number; lat: number }
 
-/** metres per degree of longitude and of latitude at a given latitude */
+/**
+ * metres per degree of longitude and of latitude at a given latitude, on the WGS84 ellipsoid:
+ * the prime-vertical radius N for longitude (times cos φ) and the meridional radius M for latitude
+ */
 export function metresPerDegree(lat: number): { mx: number; my: number } {
-  return { mx: EARTH_R * Math.cos(lat * D2R) * D2R, my: EARTH_R * D2R };
+  const s = Math.sin(lat * D2R);
+  const w = 1 - WGS84.e2 * s * s;
+  const N = WGS84.a / Math.sqrt(w);
+  const M = WGS84.a * (1 - WGS84.e2) / (w * Math.sqrt(w));
+  return { mx: N * Math.cos(lat * D2R) * D2R, my: M * D2R };
+}
+
+/** the ground distance between two points in metres, flat at their mid-latitude (exact to a millimetre over a few km) */
+export function metresBetween(a: [number, number], b: [number, number]): number {
+  const { mx, my } = metresPerDegree((a[1] + b[1]) / 2);
+  return Math.hypot((b[0] - a[0]) * mx, (b[1] - a[1]) * my);
+}
+
+/** the area of a ring of lng/lat points in square metres, flat at its mean latitude */
+export function ringAreaM2(ring: [number, number][]): number {
+  if (ring.length < 3) return 0;
+  const lat0 = ring.reduce((s, p) => s + p[1], 0) / ring.length, lng0 = ring[0][0];
+  const { mx, my } = metresPerDegree(lat0);
+  let a = 0;
+  for (let i = 0; i < ring.length; i++) {
+    const p = ring[i], q = ring[(i + 1) % ring.length];
+    a += (p[0] - lng0) * mx * (q[1] - lat0) * my - (q[0] - lng0) * mx * (p[1] - lat0) * my;
+  }
+  return Math.abs(a) / 2;
 }
 
 /** the local east-north-up frame of one community */

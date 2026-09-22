@@ -16,6 +16,7 @@ import type { Feature, PackData } from '../world/pack';
 import type { Session } from '../world/roles';
 import type { RoofForm, Opening } from '../world/build';
 import { specFromWords, type OrganicSpec } from '../world/organic';
+import { metresPerDegree } from '../world/geo';
 
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
 
@@ -143,14 +144,14 @@ export class Magic {
   /** metres east and north of the box → lng/lat */
   private at(e = 0, n = 0): [number, number] {
     const b = this.box()!;
-    const MX = 111320 * Math.cos(b.lat * Math.PI / 180), MY = 110574;
+    const { mx: MX, my: MY } = metresPerDegree(b.lat);
     return [b.lng + e / MX, b.lat + n / MY];
   }
 
   /** lng/lat → metres east and north of the box */
   private en(lng: number, lat: number): [number, number] {
     const b = this.box()!;
-    const MX = 111320 * Math.cos(b.lat * Math.PI / 180), MY = 110574;
+    const { mx: MX, my: MY } = metresPerDegree(b.lat);
     return [+((lng - b.lng) * MX).toFixed(2), +((lat - b.lat) * MY).toFixed(2)];
   }
 

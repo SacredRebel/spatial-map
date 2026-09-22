@@ -53,7 +53,7 @@ export class Hud {
     this.root.className = 'hud';
     this.root.innerHTML = `
       <header class="hud-top">
-        <div class="brand"><span class="mark">◈</span><b>${esc(o.community)}</b><span class="sub">walkable world · v0.15.0</span></div>
+        <div class="brand"><span class="mark">◈</span><b>${esc(o.community)}</b><span class="sub">walkable world · v0.16.0</span></div>
         <div class="acts">
           <button class="btn" data-act="char" data-el="char" title="the character: body, camera, controls">🧍 character</button>
           <button class="btn" data-act="view" title="first / third person (C)">👤 view</button>

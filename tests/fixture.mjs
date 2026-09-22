@@ -19,9 +19,11 @@ export const ORIGIN = { lng: -119.156345, lat: 34.432675 };
 export const SURFACE = { base: 500, east: 0.05, north: -0.03 };
 export const PAD = 0.0022;
 
-const R = 6378137, D2R = Math.PI / 180;
-const MX = R * Math.cos(ORIGIN.lat * D2R) * D2R;
-const MY = R * D2R;
+const D2R = Math.PI / 180;
+// true metres: the WGS84 ellipsoid's two radii at the origin, as the world uses them (src/world/geo.ts)
+const E2 = (1 / 298.257223563) * (2 - 1 / 298.257223563), SIN = Math.sin(ORIGIN.lat * D2R), W84 = 1 - E2 * SIN * SIN;
+const MX = 6378137 / Math.sqrt(W84) * Math.cos(ORIGIN.lat * D2R) * D2R;
+const MY = 6378137 * (1 - E2) / (W84 * Math.sqrt(W84)) * D2R;
 
 /** the surface itself — the one number every assertion in the suite is checked against */
 export const height = (lng, lat) =>
@@ -204,7 +206,10 @@ export function packFiles(base) {
     'survey.geojson': fc([
       poly({ layer: 'boundary', authority: 'survey' }, box(-80, -80, 80, 80)),
       poly({ layer: 'easement', authority: 'survey' }, box(-80, -80, -76, 80)),
-      point({ layer: 'monument', authority: 'survey', label: 'fixture pipe' }, at(80, 80))
+      point({ layer: 'monument', authority: 'survey', label: 'fixture pipe' }, at(80, 80)),
+      // two of the boundary's calls with the surveyor's distance in US survey feet: 160 m each
+      line({ layer: 'call', authority: 'survey', n: 1, distance_ft: +(160 * 3937 / 1200).toFixed(3) }, [at(-80, 80), at(80, 80)]),
+      line({ layer: 'call', authority: 'survey', n: 2, distance_ft: +(160 * 3937 / 1200).toFixed(3) }, [at(80, 80), at(80, -80)])
     ]),
     'county.geojson': fc([
       poly({ layer: 'parcel', authority: 'county' }, box(-90, -90, 90, 90)),

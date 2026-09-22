@@ -36,8 +36,11 @@ import type { GroundGrid } from './grid';
 import { organicPlan, cleanSpec, ORGANIC_DEFAULT, roofMaterialFor, type OrganicSpec, type Quantities } from '../world/organic';
 import { sortOf, megabytes, type Imports, type ImportItem } from '../world/imports';
 import { photoToJpeg, type Photo3D, type Photo3DKind } from './photo3d';
+import { fmtLen, fmtArea, parseLength, bearing, inside as insideXZ, area as areaXZ, perimeter as perimeterXZ, centroid as centroidXZ, growRing, measureBuilding, geomOf, nearest, cleanRing, scaleFor, type Units, type BuildingSize, type XZ, type LevelSize } from './measure';
+import type { MeasureView, Label } from '../ui/measure-view';
+import type { PlanInput, PlanFloor } from '../ui/plan';
 
-export type Tool = 'select' | 'marker' | 'tree' | 'fence' | 'path' | 'road' | 'block' | 'magic' | 'zone' | 'terrain' | 'wall' | 'floor' | 'roof' | 'opening' | 'organic' | 'mark' | 'bring';
+export type Tool = 'select' | 'marker' | 'tree' | 'fence' | 'path' | 'road' | 'block' | 'magic' | 'zone' | 'terrain' | 'wall' | 'floor' | 'roof' | 'opening' | 'organic' | 'mark' | 'bring' | 'tape';
 
 export interface ShapeSpec { op: 'flatten' | 'raise' | 'lower'; height: number; edge: number }
 export interface ZoneSpec { name: string; kind: string }
@@ -97,6 +100,10 @@ export interface EditorOpts {
   imports: Imports;
   /** the atlas's photo → model service; absent in tests that do not need it */
   photo3d?: Photo3D;
+  /** the dimension labels and the tapes, drawn over the world */
+  measure?: MeasureView;
+  /** open the floor plan of what is selected (P) */
+  onPlan?: () => void;
   grid: GroundGrid;
   scene: THREE.Scene;
   /** the pack, once it has loaded; null before */
@@ -190,6 +197,17 @@ export class Editor {
   jobs: PhotoJob[] = [];
   /** the 3D services the atlas has a key for; null until asked */
   photoProviders: string[] | null = null;
+  /** the owner's units: feet and inches first, or metres first (remembered in this browser) */
+  units: Units = readUnits();
+  /** a length being typed while a line is drawn — Enter puts the next point exactly that far */
+  typed = '';
+  /** the tapes laid down with the tape tool (T), and the start of the one being pulled */
+  tapes: { a: THREE.Vector3; b: THREE.Vector3 }[] = [];
+  tapeStart: THREE.Vector3 | null = null;
+  /** the organic tool grows the next building to this many square metres, gross (0 = as drawn) */
+  organicTarget = 0;
+  /** where the cursor stands on the ground while drawing, after any Shift snap */
+  private cursor: THREE.Vector3 | null = null;
 
   constructor(private o: EditorOpts) {
     this.group.name = 'editor';
@@ -262,7 +280,7 @@ export class Editor {
     this.o.player.editing = on;
     this.o.dom.style.cursor = on ? 'crosshair' : '';
     this.o.grid.visible = on;
-    if (!on) { this.cancel(); this.select(null); this.setHover(null); }
+    if (!on) { this.cancel(); this.select(null); this.setHover(null); this.clearTapes(); }
     this.o.onChange(this);
   }
   toggle() { this.setActive(!this.active); }
@@ -279,7 +297,12 @@ export class Editor {
     if (this.tool !== 'bring') this.bringing = null;
     this.drawing = [];
     this.drag = null;
+    this.typed = '';
+    this.tapeStart = null;
+    this.cursor = null;
     this.preview.visible = false;
+    this.o.measure?.set('draft', []);
+    this.tapeLabels(null);
     this.o.onChange(this);
   }
 
@@ -455,6 +478,7 @@ export class Editor {
     this.box.visible = false;
     this.dims.visible = false;
     const shown = this.selection && this.selection.kind !== 'ground' ? this.selection : p;
+    this.selLabels(shown);
     if (!shown) return;
     if (shown.kind === 'tree') {
       const w = this.o.frame.toWorld(shown.tree.lng, shown.tree.lat);
@@ -478,6 +502,9 @@ export class Editor {
   }
 
   private showBuildDims(f: Feature, obj: THREE.Object3D) {
+    // with the dimension labels on, each side already carries its length and the card says the rest;
+    // a sign over the wall as well only hid the wall
+    if (this.o.measure) return;
     const c = this.buildCentre(f);
     if (!c) return;
     const box = new THREE.Box3().setFromObject(obj);
@@ -492,11 +519,11 @@ export class Editor {
     if (kind === 'wall') {
       const L = this.wallAlong(f)?.total ?? 0;
       const n = Array.isArray(p.openings) ? p.openings.length : 0;
-      return `${name}wall ${L.toFixed(1)} m long · ${Number(p.height_m || 2.7).toFixed(1)} m high · ${Number(p.thick_m || 0.25).toFixed(2)} m ${p.material || 'plaster'}${p.smooth ? ' · curved' : ''}${n ? ` · ${n} opening${n === 1 ? '' : 's'}` : ''}`;
+      return `${name}wall ${fmtLen(L, this.units, false)} long · ${fmtLen(Number(p.height_m || 2.7), this.units, false)} high · ${fmtLen(Number(p.thick_m || 0.25), this.units, false)} ${p.material || 'plaster'}${p.smooth ? ' · curved' : ''}${n ? ` · ${n} opening${n === 1 ? '' : 's'}` : ''}`;
     }
     const area = this.ringArea(f);
-    if (kind === 'floor') return `${name}floor ${area.toFixed(0)} m² (${Math.round(area / (FT * FT))} sq ft) · ${p.material || 'wood'}${Number(p.level_m) ? ` · ${Number(p.level_m).toFixed(1)} m up` : ''}`;
-    if (kind === 'roof') return `${name}${p.form || 'gable'} roof ${area.toFixed(0)} m² · eaves ${Number(p.eaves_m || 3).toFixed(1)} m · ${Number(p.pitch_deg ?? 25)}° · ${p.material || 'tile'}`;
+    if (kind === 'floor') return `${name}floor ${fmtArea(area, this.units)} · ${p.material || 'wood'}${Number(p.level_m) ? ` · ${fmtLen(Number(p.level_m), this.units, false)} up` : ''}`;
+    if (kind === 'roof') return `${name}${p.form || 'gable'} roof ${fmtArea(area, this.units, false)} · eaves ${fmtLen(Number(p.eaves_m || 3), this.units, false)} · ${Number(p.pitch_deg ?? 25)}° · ${p.material || 'tile'}`;
     return `${name}${kind}`;
   }
 
@@ -524,10 +551,9 @@ export class Editor {
     const c = this.centroid(s);
     if (!c) return;
     const { w, d, h } = this.dimensions(s);
-    const ft = (m: number) => Math.round(m / FT);
     const text = s.status === 'model'
       ? `${s.name} · model${s.rotationDeg ? ` · ${s.rotationDeg}°` : ''}${s.altitudeM ? ` · ${s.altitudeM > 0 ? '+' : ''}${s.altitudeM.toFixed(2)} m` : ''}`
-      : `${w.toFixed(1)} × ${d.toFixed(1)} m  (${ft(w)} × ${ft(d)} ft)${h ? ` · ${h.toFixed(1)} m high` : ''}`;
+      : `${fmtLen(w, this.units, false)} × ${fmtLen(d, this.units, false)}${h ? ` · ${fmtLen(h, this.units, false)} high` : ''} · ${fmtArea(w * d, this.units, false)}`;
     this.showLabel(text, c.x, c.y + h + 2.2, c.z);
   }
 
@@ -567,8 +593,14 @@ export class Editor {
       const now = performance.now();
       if (now - this.lastHover < 60) return;         // the pick is not free; fifteen a second is plenty
       this.lastHover = now;
-      if (this.drawing.length) { const g = this.ground(this.rayAt(e.clientX, e.clientY).ray); this.previewLine(g); }
-      this.setHover(this.pick(e.clientX, e.clientY));
+      if (this.drawing.length) {
+        const g = this.ground(this.rayAt(e.clientX, e.clientY).ray);
+        this.cursor = g && e.shiftKey ? this.ortho(g) : g;
+        this.previewLine(this.cursor);
+      }
+      const hp = this.pick(e.clientX, e.clientY);
+      if (this.tool === 'tape' && this.tapeStart && hp) this.tapeLabels(this.tapePoint(hp.point));
+      this.setHover(hp);
     });
     d.addEventListener('pointerdown', e => {
       // the mark tool: press and draw round the ground to lasso it
@@ -615,7 +647,7 @@ export class Editor {
     d.addEventListener('click', e => {
       if (!this.active || e.button !== 0) return;
       if (this.swallowClick) { this.swallowClick = false; return; }
-      this.click(e.clientX, e.clientY);
+      this.click(e.clientX, e.clientY, e.shiftKey);
     });
     d.addEventListener('dblclick', e => { if (this.active && this.drawing.length >= 2) { e.preventDefault(); this.finishLine(); } });
     window.addEventListener('keydown', e => {
@@ -624,6 +656,7 @@ export class Editor {
       const k = e.key.toLowerCase();
       if (k === 'b') { this.toggle(); return; }
       if (!this.active) return;
+      if (this.typingLength(e, k)) return;
       if (k === 'escape') this.cancel();
       else if (k === 'enter' && this.drawing.length >= 2) this.finishLine();
       else if (k === 'backspace' && this.drawing.length) { this.drawing.pop(); this.previewLine(null); this.o.onChange(this); }
@@ -641,6 +674,8 @@ export class Editor {
       else if (k === 'k') this.setTool('organic');
       else if (k === 'm') this.setTool('mark');
       else if (k === 'i') this.setTool('bring');
+      else if (k === 't') this.setTool('tape');
+      else if (k === 'p') this.o.onPlan?.();
       else if (k === '[' && this.selection?.kind === 'import') this.turnImport(this.selection.id, -SNAP_DEG);
       else if (k === ']' && this.selection?.kind === 'import') this.turnImport(this.selection.id, SNAP_DEG);
       else if ((k === '+' || k === '=') && this.selection?.kind === 'import') this.liftImport(this.selection.id, 0.25);
@@ -661,7 +696,7 @@ export class Editor {
   }
 
   /** a click, by tool */
-  click(clientX: number, clientY: number) {
+  click(clientX: number, clientY: number, shift = false) {
     const p = this.pick(clientX, clientY);
     if (!p) return;
     if (this.moving) {
@@ -679,13 +714,26 @@ export class Editor {
       case 'block': if (p.kind === 'ground' && this.o.caps().place) this.addBlock(p.lng, p.lat, this.block, this.o.player.state().headingDeg); break;
       case 'magic': if (p.kind === 'ground' && this.o.caps().magic) this.promptMagic(p.lng, p.lat); break;
       case 'fence': case 'path': case 'road': case 'zone': case 'terrain': case 'mark':
-        if (p.kind === 'ground') { this.drawing.push([p.lng, p.lat]); this.previewLine(null); this.o.onChange(this); }
+        if (p.kind === 'ground') {
+          const at = shift && this.drawing.length ? this.ortho(p.point) : null;
+          const ll = at ? this.o.frame.toLngLat(at.x, at.z) : { lng: p.lng, lat: p.lat };
+          this.drawing.push([ll.lng, ll.lat]); this.previewLine(this.cursor); this.o.onChange(this);
+        }
         break;
+      case 'tape': {
+        const at = this.tapePoint(p.point);
+        if (!this.tapeStart) this.tapeStart = at;
+        else { this.tapes.push({ a: this.tapeStart, b: at }); if (this.tapes.length > 12) this.tapes.shift(); this.tapeStart = null; }
+        this.tapeLabels(null);
+        this.o.onChange(this);
+        break;
+      }
       case 'organic':
         if (!this.o.caps().place) break;
         if (p.kind === 'ground' || p.kind === 'build' || p.kind === 'structure' || p.kind === 'building') {
-          const ll = this.o.frame.toLngLat(p.point.x, p.point.z);
-          this.drawing.push([ll.lng, ll.lat]); this.previewLine(null); this.o.onChange(this);
+          const q = shift && this.drawing.length ? this.ortho(p.point) : p.point;
+          const ll = this.o.frame.toLngLat(q.x, q.z);
+          this.drawing.push([ll.lng, ll.lat]); this.previewLine(this.cursor); this.o.onChange(this);
         }
         break;
       case 'wall': case 'floor': case 'roof': {
@@ -693,14 +741,15 @@ export class Editor {
         if (!this.o.caps().place) break;
         const at = p.kind === 'ground' ? p.point : p.kind === 'build' || p.kind === 'structure' || p.kind === 'building' ? p.point : null;
         if (!at) break;
-        const s = this.snapPoint(at.x, at.z);
+        const o = shift && this.drawing.length ? this.ortho(at) : null;
+        const s = o ? { x: o.x, z: o.z, ll: ((q) => [q.lng, q.lat] as [number, number])(this.o.frame.toLngLat(o.x, o.z)) } : this.snapPoint(at.x, at.z);
         // a wall that comes back to its own start closes, and is finished
         if (this.tool === 'wall' && this.drawing.length >= 3) {
           const w0 = this.o.frame.toWorld(this.drawing[0][0], this.drawing[0][1]);
           if (Math.hypot(w0.x - s.x, w0.z - s.z) < 0.3) { this.drawing.push(this.drawing[0]); this.finishLine(); break; }
         }
         this.drawing.push(s.ll);
-        this.previewLine(null);
+        this.previewLine(this.cursor);
         this.o.onChange(this);
         break;
       }
@@ -881,9 +930,12 @@ export class Editor {
     this.preview.geometry.dispose();
     this.preview.geometry = new THREE.BufferGeometry().setFromPoints(pts);
     this.preview.visible = pts.length >= 1;
+    this.draftLabels(cursor);
   }
 
   finishLine() {
+    this.typed = '';
+    this.o.measure?.set('draft', []);
     if (this.polygonal) {
       if (this.drawing.length < 3) return;
       const coords = this.drawing.slice();
@@ -1444,7 +1496,8 @@ export class Editor {
     if (ring.length < 3) return null;
     const spec = cleanSpec(specIn);
     const title = (name || '').trim().slice(0, 60) || this.nextOrganicName();
-    const parts = this.organicParts(ring, spec, title, null);
+    const fitted = this.organicTarget > 0 ? this.fitOrganicRing(ring, spec, title, null, this.organicTarget) : null;
+    const parts = this.organicParts(fitted ?? ring, spec, title, null);
     if (!parts) return null;
     this.commitBuild(parts, String(parts.find(f => f.properties.kind === 'wall')?.properties.id ?? parts[0].properties.id));
     return title;
@@ -1487,7 +1540,7 @@ export class Editor {
    * Grow an organic building again with some of its numbers changed — the sliders. The parts keep
    * their ids, so this is a change to the same building, one undo step, not a new one beside it.
    */
-  regenerateOrganic(structure: string, patch: Partial<OrganicSpec>): boolean {
+  regenerateOrganic(structure: string, patch: Partial<OrganicSpec>, perimeter?: [number, number][]): boolean {
     const was = this.organicOf(structure);
     if (!was) return false;
     const spec = cleanSpec({ ...was.spec, ...patch });
@@ -1498,7 +1551,7 @@ export class Editor {
       roof: String(old.find(f => f.properties.kind === 'roof')?.properties.id ?? ''),
       pad: String((was.floor.properties.organic as Record<string, unknown>).pad_id ?? '')
     };
-    const parts = this.organicParts(was.perimeter, spec, structure, ids);
+    const parts = this.organicParts(perimeter ?? was.perimeter, spec, structure, ids);
     if (!parts) return false;
     this.snapshot();
     const keepIds = new Set(parts.map(f => String(f.properties.id)));
@@ -1872,6 +1925,408 @@ export class Editor {
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   }
 
+
+  // ---- measuring (v0.16): true lengths while drawing, the tape, square footage, the plan -------------
+  setUnits(u: Units) {
+    this.units = u;
+    try { localStorage.setItem('spatial-map:units', u); } catch { /* private window */ }
+    this.previewLine(this.cursor);
+    this.tapeLabels(null);
+    this.setHover(this.hover);
+    this.o.onChange(this);
+  }
+
+  /** the tools that draw a line of points, where a typed length and Shift mean something */
+  private get lineTool(): boolean {
+    return ['wall', 'floor', 'roof', 'fence', 'path', 'road', 'zone', 'terrain', 'organic', 'mark'].includes(this.tool);
+  }
+
+  /**
+   * While a line is being drawn, a number typed is a length: 32'6" then Enter puts the next point
+   * exactly that far along the way the cursor points. Digits start it (instead of switching tools),
+   * Backspace edits it, Esc drops it.
+   */
+  private typingLength(e: KeyboardEvent, k: string): boolean {
+    if (!this.lineTool || !this.drawing.length || e.ctrlKey || e.metaKey || e.altKey) return false;
+    const ch = e.key;
+    if (this.typed) {
+      if (k === 'enter') { e.preventDefault(); this.applyTyped(); return true; }
+      if (k === 'backspace') { e.preventDefault(); this.typed = this.typed.slice(0, -1); this.draftLabels(this.cursor); this.o.onChange(this); return true; }
+      if (k === 'escape') { this.typed = ''; this.draftLabels(this.cursor); this.o.onChange(this); return true; }
+      if (/^[0-9.'"mftin]$/i.test(ch)) { e.preventDefault(); this.typed += ch; this.draftLabels(this.cursor); this.o.onChange(this); return true; }
+      return false;
+    }
+    if (/^[0-9.]$/.test(ch)) { e.preventDefault(); this.typed = ch; this.draftLabels(this.cursor); this.o.onChange(this); return true; }
+    return false;
+  }
+
+  /** the typed length becomes the next point: that far from the last one, toward the cursor */
+  typeLength(text: string): boolean { this.typed = text; return this.applyTyped(); }
+
+  private applyTyped(): boolean {
+    const L = parseLength(this.typed, this.units);
+    this.typed = '';
+    if (!L || !this.drawing.length) { this.draftLabels(this.cursor); this.o.onChange(this); return false; }
+    const last = this.drawing[this.drawing.length - 1];
+    const p = this.o.frame.toWorld(last[0], last[1]);
+    let dir: XZ | null = this.cursor ? { x: this.cursor.x - p.x, z: this.cursor.z - p.z } : null;
+    if (!dir || Math.hypot(dir.x, dir.z) < 1e-3) {
+      if (this.drawing.length >= 2) {
+        const b = this.drawing[this.drawing.length - 2], q = this.o.frame.toWorld(b[0], b[1]);
+        dir = { x: p.x - q.x, z: p.z - q.z };
+      } else dir = { x: 1, z: 0 };
+    }
+    const l = Math.hypot(dir.x, dir.z) || 1;
+    const ll = this.o.frame.toLngLat(p.x + dir.x / l * L, p.z + dir.z / l * L);
+    this.drawing.push([ll.lng, ll.lat]);
+    this.previewLine(this.cursor);
+    this.o.onChange(this);
+    return true;
+  }
+
+  /**
+   * Shift while drawing: the direction snaps to 45° from the last segment (to 15° steps for the
+   * first), and the length to 6 in (or 10 cm) — square corners and round numbers, the way a plan is drawn.
+   */
+  private ortho(g: THREE.Vector3): THREE.Vector3 {
+    const last = this.drawing[this.drawing.length - 1];
+    if (!last) return g;
+    const p = this.o.frame.toWorld(last[0], last[1]);
+    const dx = g.x - p.x, dz = g.z - p.z, L = Math.hypot(dx, dz);
+    if (L < 1e-3) return g;
+    let base = 0, step = 15 * Math.PI / 180;
+    if (this.drawing.length >= 2) {
+      const b = this.drawing[this.drawing.length - 2], q = this.o.frame.toWorld(b[0], b[1]);
+      base = Math.atan2(p.z - q.z, p.x - q.x); step = Math.PI / 4;
+    }
+    const ang = base + Math.round((Math.atan2(dz, dx) - base) / step) * step;
+    const unit = this.units === 'ft' ? 0.1524 : 0.1;
+    const len = Math.max(unit, Math.round(L / unit) * unit);
+    const x = p.x + Math.cos(ang) * len, z = p.z + Math.sin(ang) * len;
+    const ll = this.o.frame.toLngLat(x, z);
+    return new THREE.Vector3(x, this.o.field.atOr(ll.lng, ll.lat, g.y), z);
+  }
+
+  /** the numbers on the line being drawn: each side, the side being pulled (with its bearing and corner), and the area it closes */
+  private draftLabels(cursor: THREE.Vector3 | null) {
+    const view = this.o.measure;
+    if (!view) return;
+    if (!this.drawing.length) { view.set('draft', []); return; }
+    const pts = this.drawing.map(([lng, lat]) => { const w = this.o.frame.toWorld(lng, lat); return new THREE.Vector3(w.x, this.o.field.atOr(lng, lat, 0) + 0.3, w.z); });
+    const labels: Label[] = [];
+    const u = this.units;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i], b = pts[i + 1], L = Math.hypot(b.x - a.x, b.z - a.z);
+      if (L > 0.05) labels.push({ at: a.clone().lerp(b, 0.5).setY(Math.max(a.y, b.y) + 0.5), text: fmtLen(L, u, false), kind: 'seg' });
+    }
+    const all = pts.slice();
+    if (cursor) {
+      const a = pts[pts.length - 1], c = cursor.clone().setY(cursor.y + 0.3);
+      const L = Math.hypot(c.x - a.x, c.z - a.z);
+      let text = `${fmtLen(L, u)} · ${Math.round(bearing(a, c))}°`;
+      if (pts.length >= 2) {
+        const p0 = pts[pts.length - 2];
+        const v1 = { x: p0.x - a.x, z: p0.z - a.z }, v2 = { x: c.x - a.x, z: c.z - a.z };
+        const l1 = Math.hypot(v1.x, v1.z), l2 = Math.hypot(v2.x, v2.z);
+        if (l1 > 1e-3 && l2 > 1e-3) text += ` · corner ${Math.round(Math.acos(Math.max(-1, Math.min(1, (v1.x * v2.x + v1.z * v2.z) / (l1 * l2)))) * 180 / Math.PI)}°`;
+      }
+      if (L > 0.02) labels.push({ at: a.clone().lerp(c, 0.5).setY(Math.max(a.y, c.y) + 0.9), text, kind: 'live' });
+      all.push(c);
+    }
+    if (this.typed) {
+      const at = (cursor ?? pts[pts.length - 1]).clone();
+      labels.push({ at: at.setY(at.y + 1.8), text: `⌨ ${this.typed}  ↵ Enter`, kind: 'typed' });
+    }
+    const closes = this.polygonal || (this.tool === 'wall' && all.length >= 4 && all[0].distanceTo(all[all.length - 1]) < 0.35);
+    if (closes && all.length >= 3) {
+      const ring = cleanRing(all.map(p => ({ x: p.x, z: p.z })));
+      if (ring.length >= 3) {
+        const A = areaXZ(ring), P = perimeterXZ(ring), c = centroidXZ(ring);
+        const y = all.reduce((s, p) => s + p.y, 0) / all.length + 0.6;
+        const gross = this.tool === 'wall' ? ` · ${fmtArea(areaXZ(growRing(ring, this.wall.thick / 2)), u, false)} to the outside of the wall` : '';
+        labels.push({ at: new THREE.Vector3(c.x, y, c.z), text: `${fmtArea(A, u)}${gross} · round ${fmtLen(P, u, false)}`, kind: 'area' });
+      }
+    }
+    view.set('draft', labels);
+  }
+
+  /** a tape end: the point clicked, pulled onto a wall's end or corner when one is within 30 cm */
+  private tapePoint(p: THREE.Vector3): THREE.Vector3 {
+    let best = 0.3, out = p.clone();
+    for (const f of this.o.pack()?.build.features ?? []) {
+      const cs = f.geometry.type === 'LineString' ? f.geometry.coordinates : f.geometry.type === 'Polygon' ? f.geometry.coordinates[0] ?? [] : [];
+      for (const [lng, lat] of cs) {
+        const w = this.o.frame.toWorld(lng, lat);
+        const d = Math.hypot(w.x - p.x, w.z - p.z);
+        if (d < best) { best = d; out = new THREE.Vector3(w.x, p.y, w.z); }
+      }
+    }
+    return out;
+  }
+
+  /** what a tape reads: the level distance first, then the rise and the slope when the ends differ in height */
+  tapeText(a: THREE.Vector3, b: THREE.Vector3): string {
+    const h = Math.hypot(b.x - a.x, b.z - a.z), rise = b.y - a.y;
+    let t = fmtLen(h, this.units);
+    if (Math.abs(rise) > 0.05) t += ` · rise ${fmtLen(Math.abs(rise), this.units, false)}${h > 0.1 ? ` (${Math.round(Math.abs(rise) / h * 100)}%)` : ''} · along ${fmtLen(Math.hypot(h, rise), this.units, false)}`;
+    return t;
+  }
+
+  private tapeLabels(cursor: THREE.Vector3 | null) {
+    const view = this.o.measure;
+    if (!view) return;
+    const list = this.tapes.slice();
+    if (this.tapeStart && cursor) list.push({ a: this.tapeStart, b: cursor });
+    view.setTapes(list);
+    view.set('tape', list.map(t => ({ at: t.a.clone().lerp(t.b, 0.5).setY(Math.max(t.a.y, t.b.y) + 0.6), text: this.tapeText(t.a, t.b), kind: 'tape' as const }))
+      .concat(this.tapeStart && !cursor ? [{ at: this.tapeStart.clone().setY(this.tapeStart.y + 0.8), text: 'now click the other end', kind: 'tape' as const }] : []));
+  }
+
+  clearTapes() {
+    this.tapes = [];
+    this.tapeStart = null;
+    this.tapeLabels(null);
+    this.o.onChange(this);
+  }
+
+  /** the numbers on what is selected: a wall's sides, a floor's edges and area, a block's outline */
+  private selLabels(shown: Pick | null) {
+    const view = this.o.measure;
+    if (!view) return;
+    const out: Label[] = [];
+    const u = this.units;
+    const edges = (ring: XZ[], y: number, closed: boolean) => {
+      const n = closed ? ring.length : ring.length - 1;
+      const long = [];
+      for (let i = 0; i < n; i++) { const a = ring[i], b = ring[(i + 1) % ring.length]; const L = Math.hypot(b.x - a.x, b.z - a.z); if (L >= 1) long.push({ a, b, L }); }
+      if (long.length > 24) return;
+      for (const e of long) out.push({ at: new THREE.Vector3((e.a.x + e.b.x) / 2, y, (e.a.z + e.b.z) / 2), text: fmtLen(e.L, u, false), kind: 'sel' });
+    };
+    if (shown?.kind === 'build') {
+      const f = shown.feature;
+      const top = new THREE.Box3().setFromObject(shown.object).max.y + 0.3;
+      if (f.properties.kind === 'wall' && f.geometry.type === 'LineString') {
+        const along = this.wallAlong(f);
+        if (along) {
+          if (f.properties.smooth) { const mid = along.pts[Math.floor(along.pts.length / 2)]; out.push({ at: new THREE.Vector3(mid.x, top, mid.z), text: `${fmtLen(along.total, u)} along the curve`, kind: 'sel' }); }
+          else edges(along.pts, top, false);
+        }
+      } else if (f.geometry.type === 'Polygon') {
+        const ring = cleanRing((f.geometry.coordinates[0] || []).map(([lng, lat]) => this.o.frame.toWorld(lng, lat)));
+        if (ring.length >= 3) {
+          edges(ring, top, true);
+          const c = centroidXZ(ring);
+          out.push({ at: new THREE.Vector3(c.x, top + 0.4, c.z), text: fmtArea(areaXZ(ring), u), kind: 'area' });
+        }
+      }
+    } else if (shown?.kind === 'structure' && shown.structure.outline && shown.structure.outline.length >= 3) {
+      const ring = cleanRing(shown.structure.outline.map(([lng, lat]) => this.o.frame.toWorld(lng, lat)));
+      const top = new THREE.Box3().setFromObject(shown.object).max.y + 0.3;
+      if (ring.length >= 3) { edges(ring, top, true); const c = centroidXZ(ring); out.push({ at: new THREE.Vector3(c.x, top + 0.4, c.z), text: fmtArea(areaXZ(ring), u), kind: 'area' }); }
+    }
+    view.set('sel', out);
+  }
+
+  /** a set of parts measured as one building */
+  private sizeOf(parts: Feature[]): BuildingSize | null {
+    const { walls, floors } = geomOf(parts, ([lng, lat]) => this.o.frame.toWorld(lng, lat), f => f.geometry.type === 'LineString' ? wallLine(f.geometry.coordinates, !!f.properties.smooth, this.o.frame) : []);
+    const s = measureBuilding(walls, floors);
+    return s.levels.length ? s : null;
+  }
+
+  /** how big a named building is: gross and net square footage per level, the footprint, the outside dimensions */
+  buildingSize(structure: string): BuildingSize | null { return this.sizeOf(this.buildParts(structure)); }
+
+  /** the surveyed property line, in world metres, when the pack has one */
+  boundary(): XZ[] | null {
+    const f = this.o.pack()?.survey.features.find(x => x.properties.layer === 'boundary' && x.geometry.type === 'Polygon');
+    if (!f || f.geometry.type !== 'Polygon') return null;
+    const r = cleanRing((f.geometry.coordinates[0] || []).map(([lng, lat]) => this.o.frame.toWorld(lng, lat)));
+    return r.length >= 3 ? r : null;
+  }
+
+  /** how far an outline stands from the nearest property line, and where */
+  setback(outline: XZ[]): { d: number; from: XZ; to: XZ; inside: boolean } | null {
+    const b = this.boundary();
+    if (!b || outline.length < 3) return null;
+    return { ...nearest(outline, b), inside: outline.every(p => insideXZ(p, b)) };
+  }
+
+  /**
+   * The world's metres checked against the licensed survey: each boundary call's length, measured
+   * here from its two ends, against the distance the surveyor wrote down.
+   */
+  surveyCheck(): { lines: number; worstFt: number } | null {
+    const US_FT = 1200 / 3937;
+    let n = 0, worst = 0;
+    for (const f of this.o.pack()?.survey.features ?? []) {
+      const d = Number(f.properties.distance_ft);
+      if (f.properties.layer !== 'call' || f.geometry.type !== 'LineString' || !(d > 0)) continue;
+      const c = f.geometry.coordinates, a = this.o.frame.toWorld(c[0][0], c[0][1]), b = this.o.frame.toWorld(c[c.length - 1][0], c[c.length - 1][1]);
+      worst = Math.max(worst, Math.abs(Math.hypot(b.x - a.x, b.z - a.z) / US_FT - d));
+      n++;
+    }
+    return n ? { lines: n, worstFt: worst } : null;
+  }
+
+  /** a part scaled about a point: its geometry grows, its thicknesses and heights stay, its openings keep their place along it */
+  private scaledPart(f: Feature, c: XZ, k: number): Feature {
+    const g: Feature = JSON.parse(JSON.stringify(f));
+    const map = ([lng, lat]: [number, number]): [number, number] => {
+      const w = this.o.frame.toWorld(lng, lat);
+      const q = this.o.frame.toLngLat(c.x + (w.x - c.x) * k, c.z + (w.z - c.z) * k);
+      return [q.lng, q.lat];
+    };
+    if (g.geometry.type === 'LineString') g.geometry.coordinates = g.geometry.coordinates.map(map);
+    else if (g.geometry.type === 'Polygon') g.geometry.coordinates = g.geometry.coordinates.map(r => r.map(map));
+    if (Array.isArray(g.properties.openings)) g.properties.openings = (g.properties.openings as Opening[]).map(o => ({ ...o, at_m: Math.round(o.at_m * k * 100) / 100 }));
+    return g;
+  }
+
+  /**
+   * Make a building a given size: 5,000 sq ft gross means 5,000 sq ft to the outside of the outside
+   * walls, summed over the counted levels. Walls keep their thickness, so this is solved, not guessed.
+   */
+  resizeBuilding(structure: string, targetM2: number): boolean {
+    if (!(targetM2 > 1)) return false;
+    if (this.organicOf(structure)) return this.resizeOrganic(structure, targetM2);
+    const parts = this.buildParts(structure);
+    const size0 = this.sizeOf(parts);
+    if (!size0 || !(size0.grossM2 > 0)) { this.said(false, `${structure} has nothing to measure yet`); return false; }
+    const c = centroidXZ(size0.footprint);
+    const scaled = (k: number) => parts.map(f => this.scaledPart(f, c, k));
+    let k = 1;
+    for (let i = 0; i < 10; i++) {
+      const g = this.sizeOf(scaled(k))?.grossM2 ?? 0;
+      if (!(g > 0) || Math.abs(g - targetM2) < 0.01) break;
+      k *= scaleFor(g, targetM2);
+    }
+    const next = scaled(k);
+    this.snapshot();
+    for (const f of next) {
+      f.properties.reported = new Date().toISOString().slice(0, 10);
+      const at = this.edits.findIndex(x => String(x.properties.id) === String(f.properties.id) && x.properties.op === 'add');
+      if (at >= 0) this.edits[at] = f; else this.edits.push(f);
+    }
+    this.persist();
+    this.redraw();
+    const wall = next.find(f => f.properties.kind === 'wall') ?? next[0];
+    this.selectBuild(String(wall.properties.id));
+    this.o.onChange(this);
+    return true;
+  }
+
+  /** an organic ring grown or shrunk about its middle until the building it makes has this gross area */
+  private fitOrganicRing(ring: [number, number][], spec: OrganicSpec, name: string, ids: { floor: string; wall: string; roof: string; pad: string } | null, targetM2: number): [number, number][] | null {
+    const xz = ring.map(([lng, lat]) => this.o.frame.toWorld(lng, lat));
+    const c = centroidXZ(xz);
+    const at = (k: number) => xz.map(p => { const q = this.o.frame.toLngLat(c.x + (p.x - c.x) * k, c.z + (p.z - c.z) * k); return [q.lng, q.lat] as [number, number]; });
+    let k = 1, got: [number, number][] | null = null;
+    for (let i = 0; i < 10; i++) {
+      const r = at(k);
+      const parts = this.organicParts(r, spec, name, ids);
+      if (!parts) { k *= 1.25; continue; }
+      got = r;
+      const g = this.sizeOf(parts.filter(f => f.properties.layer === 'build'))?.grossM2 ?? 0;
+      if (!(g > 0) || Math.abs(g - targetM2) < 0.01) break;
+      k *= scaleFor(g, targetM2);
+    }
+    return got;
+  }
+
+  private resizeOrganic(structure: string, targetM2: number): boolean {
+    const was = this.organicOf(structure);
+    if (!was) return false;
+    const old = this.buildParts(structure);
+    const ids = {
+      floor: String(was.floor.properties.id),
+      wall: String(old.find(f => f.properties.kind === 'wall')?.properties.id ?? ''),
+      roof: String(old.find(f => f.properties.kind === 'roof')?.properties.id ?? ''),
+      pad: String((was.floor.properties.organic as Record<string, unknown>).pad_id ?? '')
+    };
+    const ring = was.perimeter.slice();
+    if (ring.length > 3 && ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1]) ring.pop();
+    const fitted = this.fitOrganicRing(ring, was.spec, structure, ids, targetM2);
+    return fitted ? this.regenerateOrganic(structure, {}, fitted) : false;
+  }
+
+  /** what the plan draws for the selection: a drawn building, a model's floors, or a block */
+  planInput(): PlanInput | null {
+    const sel = this.selection;
+    const pack = this.o.pack();
+    const W = ([lng, lat]: [number, number]) => this.o.frame.toWorld(lng, lat);
+    const siteOf = (skip: string | null) => {
+      const easements = (pack?.survey.features ?? []).filter(f => f.properties.layer === 'easement' && f.geometry.type === 'Polygon').map(f => cleanRing(((f.geometry as { coordinates: [number, number][][] }).coordinates[0] || []).map(W)));
+      const others = this.o.structures.list.filter(s => s.id !== skip && s.outline && s.outline.length >= 3).map(s => ({ name: s.name, ring: cleanRing(s.outline!.map(W)) }));
+      const trees = (pack?.trees ?? []).map(t => { const w = W([t.lng, t.lat]); return { x: w.x, z: w.z, r: Math.max(1, t.crown) }; });
+      const bf = pack?.survey.features.find(f => f.properties.layer === 'boundary');
+      const acres = Number(bf?.properties.area_acres);
+      const parcel = [pack?.manifest.apn ? `APN ${pack.manifest.apn}` : '', acres > 0 ? `${acres.toFixed(2)} acres` : ''].filter(Boolean).join(' · ');
+      return { boundary: this.boundary(), easements, others, trees, parcel };
+    };
+    const centreOf = (r: XZ[]) => { const c = centroidXZ(r); return this.o.frame.toLngLat(c.x, c.z); };
+    const survey = this.surveyCheck();
+    if (sel?.kind === 'build') {
+      const name = String(sel.feature.properties.structure ?? '');
+      const parts = name ? this.buildParts(name) : [sel.feature];
+      const { walls, floors } = geomOf(parts, W, f => f.geometry.type === 'LineString' ? wallLine(f.geometry.coordinates, !!f.properties.smooth, this.o.frame) : []);
+      const size = measureBuilding(walls, floors);
+      const roofs = parts.filter(f => f.properties.kind === 'roof' && f.geometry.type === 'Polygon').map(f => cleanRing(((f.geometry as { coordinates: [number, number][][] }).coordinates[0] || []).map(W)));
+      const fp = size.footprint.length ? size.footprint : walls[0]?.centre ?? [];
+      return {
+        title: name || this.describeBuild(sel.feature).split(' · ')[0], kind: 'drawn',
+        walls: walls.map(w => ({ centre: w.centre, thick: w.thick, closed: w.closed, smooth: w.smooth, height: w.height, base: w.base, openings: w.openings })),
+        cuts: [], floors: floors.map(f => ({ ring: f.ring, level: f.level, interior: true })), roofs,
+        size: size.levels.length ? size : null, site: siteOf(null), setback: fp.length >= 3 ? this.setback(fp) : null,
+        centre: fp.length ? centreOf(fp) : { lng: 0, lat: 0 }, survey
+      };
+    }
+    if (sel?.kind === 'structure') {
+      const s = sel.structure;
+      if (s.status === 'model') return this.modelPlan(s, siteOf(s.id), survey);
+      if (!s.outline || s.outline.length < 3) return null;
+      const ring = cleanRing(s.outline.map(W));
+      const size = measureBuilding([], [{ ring, level: 0, thick: 0.2, id: s.id }]);
+      return { title: s.name, kind: 'block', walls: [], cuts: [], floors: [{ ring, level: 0, interior: true }], roofs: [], size, site: siteOf(s.id), setback: this.setback(ring), centre: centreOf(ring), survey, note: s.status === 'massing' ? 'a massing block: its outline, one level' : 'a reserved site' };
+    }
+    return null;
+  }
+
+  /**
+   * A model's plan from the floors and walls it carries for walking: the rooms at each level, the
+   * walls cut 1.2 m above them, and the floor area of the rooms. Terraces, steps, paths and yards
+   * are drawn but not counted.
+   */
+  private modelPlan(s: Structure, site: PlanInput['site'], survey: PlanInput['survey']): PlanInput | null {
+    const OUTSIDE = /step|stair|terrace|deck|porch|patio|path|drive|approach|gate|creek|ford|pool|court|yard|arrival|garden|pad|link|ramp|bridge|lawn|plaza|dock|serving|wash-down|kiva|utility|disposal|equipment/i;
+    const pre = `${s.id}:`;
+    const plats = this.o.structures.platforms.filter(p => p.id.startsWith(pre));
+    if (!plats.length) return null;
+    const named = plats.map(p => ({ ring: cleanRing(p.ring), top: p.top, name: p.id.slice(pre.length), interior: !OUTSIDE.test(p.id.slice(pre.length)) })).filter(p => p.ring.length >= 3);
+    const inner = named.filter(p => p.interior);
+    // the main floor is the level with the most room on it; the others are read up and down from it
+    const byTop = new Map<number, number>();
+    for (const p of inner.length ? inner : named) { const k = Math.round(p.top * 4) / 4; byTop.set(k, (byTop.get(k) ?? 0) + areaXZ(p.ring)); }
+    const base = [...byTop.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    const floors: PlanFloor[] = named.map(p => ({ ring: p.ring, level: Math.round((p.top - base) * 4) / 4, name: p.name, interior: p.interior }));
+    const levelsAt = [...new Set(floors.filter(f => f.interior).map(f => f.level))].sort((a, b) => a - b);
+    const levels: LevelSize[] = levelsAt.map(L => {
+      const here = floors.filter(f => f.interior && f.level === L);
+      const g = here.reduce((t, f) => t + areaXZ(f.ring), 0);
+      const big = here.slice().sort((a, b) => areaXZ(b.ring) - areaXZ(a.ring))[0];
+      return { level: L, grossM2: g, netM2: g, ceilingM: null, counted: true, from: 'model' as const, outline: big.ring };
+    }).filter(l => l.grossM2 >= 9);          // a landing or a hearth is not a level
+    const outline = s.outline && s.outline.length >= 3 ? cleanRing(s.outline.map(([lng, lat]) => this.o.frame.toWorld(lng, lat))) : levels[0]?.outline ?? [];
+    const size: BuildingSize | null = levels.length ? {
+      levels, grossM2: levels.reduce((t, l) => t + l.grossM2, 0), netM2: levels.reduce((t, l) => t + l.netM2, 0),
+      footprintM2: outline.length >= 3 ? areaXZ(outline) : levels[0].grossM2, footprint: outline,
+      width: 0, depth: 0, wallLengthM: 0, basis: "the model's room floors (terraces, steps and yards not counted)"
+    } : null;
+    if (size && outline.length >= 3) { const box = measureBox(outline); size.width = box.w; size.depth = box.d; }
+    const cuts = this.o.structures.solids.filter(x => x.id.startsWith(pre)).map(x => ({ ring: cleanRing(x.ring), base: x.base - base, top: x.top - base }));
+    return { title: s.name, kind: 'model', walls: [], cuts, floors, roofs: [], size, site, setback: outline.length >= 3 ? this.setback(outline) : null, centre: this.o.frame.toLngLat(centroidXZ(outline.length ? outline : floors[0].ring).x, centroidXZ(outline.length ? outline : floors[0].ring).z), survey, note: 'from the model' };
+  }
+
   private said(ok: boolean, message: string) {
     this.lastSave = { ok, message, at: Date.now() };
     this.o.onChange(this);
@@ -1879,3 +2334,16 @@ export class Editor {
   }
 }
 
+
+/** the units this browser last chose: feet unless it said metres */
+function readUnits(): Units {
+  try { return localStorage.getItem('spatial-map:units') === 'm' ? 'm' : 'ft'; } catch { return 'ft'; }
+}
+
+function measureBox(r: XZ[]): { w: number; d: number } {
+  let best = 0, ux = 1, uz = 0;
+  for (let i = 0; i < r.length; i++) { const p = r[i], q = r[(i + 1) % r.length], l = Math.hypot(q.x - p.x, q.z - p.z); if (l > best) { best = l; ux = (q.x - p.x) / l; uz = (q.z - p.z) / l; } }
+  let a0 = Infinity, a1 = -Infinity, b0 = Infinity, b1 = -Infinity;
+  for (const p of r) { const a = p.x * ux + p.z * uz, b = -p.x * uz + p.z * ux; a0 = Math.min(a0, a); a1 = Math.max(a1, a); b0 = Math.min(b0, b); b1 = Math.max(b1, b); }
+  return { w: a1 - a0, d: b1 - b0 };
+}

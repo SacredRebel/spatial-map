@@ -92,6 +92,7 @@ export class Structures {
   /** floors and walls the loaded models brought with them, in world metres */
   platforms: Platform[] = [];
   solids: Solid[] = [];
+  private gen = 0;
   /** called when a model's floors and walls have arrived, so the walker can be told */
   onWalk: (() => void) | null = null;
 
@@ -113,9 +114,12 @@ export class Structures {
   /** draw everything that belongs to this property; models are fetched in the background */
   build(pid?: string) {
     this.clear();
+    // a model still loading from an earlier build must not land in this one: without this, a burst
+    // of edits drew the same house several times over, and walked on each copy's floors
+    const gen = ++this.gen;
     for (const s of this.list) {
       if (pid && s.pid !== pid) continue;
-      if (s.status === 'model' && s.model && s.position) void this.addModel(s);
+      if (s.status === 'model' && s.model && s.position) void this.addModel(s, gen);
       else if (s.outline && s.outline.length >= 3) this.addPlan(s);
     }
   }
@@ -209,12 +213,13 @@ export class Structures {
   }
 
   /** a real building. The loader is imported here and nowhere else, so it ships only when used. */
-  private async addModel(s: Structure) {
+  private async addModel(s: Structure, gen = this.gen) {
     try {
       const loader = await makeGltfLoader();
       // absolute (another of ours serves it), a blob the studio just handed over, or the atlas's own path
       const url = s.model!.startsWith('http') || s.model!.startsWith('blob:') ? s.model! : `${this.origin}${s.model}`;
       const gltf = await loader.loadAsync(url);
+      if (gen !== this.gen) return;            // the world was rebuilt while this loaded
       const root = gltf.scene;
       const [lng, lat] = s.position!;
       const w = this.frame.toWorld(lng, lat);

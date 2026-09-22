@@ -40,6 +40,8 @@ import { loadGrain, loadTile } from './world/grain';
 import { Editor } from './edit/editor';
 import { Panel } from './edit/panel';
 import { Magic } from './edit/magic';
+import { MeasureView } from './ui/measure-view';
+import { PlanView } from './ui/plan';
 import { GroundGrid } from './edit/grid';
 import { Inspect } from './ui/inspect';
 import { CAPS, loadSession, saveSession, roleFor, type Session } from './world/roles';
@@ -347,8 +349,17 @@ player.camDist = camDist0;
 
 /** a photo made into a model by the atlas; the PIN is the one this browser signed in with */
 const photo3d = new Photo3D(atlas, () => session.pin);
+/** the dimension labels and tapes over the world, and the floor plan */
+const measure = new MeasureView(app, scene);
+const plan = new PlanView(app);
+function openPlan() {
+  const input = editor.planInput();
+  if (!input) { hud.setNotice('select a wall, a floor, a block or a building first — then 📐 plan (P)'); return; }
+  plan.open(input, editor.units);
+}
 const editor = new Editor({
-  dom: renderer.domElement, camera, frame, field, player, vegetation, today, structures, build, imports, photo3d, grid, scene, atlas,
+  dom: renderer.domElement, camera, frame, field, player, vegetation, today, structures, build, imports, photo3d, grid, scene, atlas, measure,
+  onPlan: () => openPlan(),
   pack: () => pack,
   pid: () => pid,
   structuresBase: () => structuresBase,
@@ -359,8 +370,10 @@ const editor = new Editor({
 });
 imports.onChange = () => { if (editor.active) panel.render(); };
 const magic = new Magic(app, editor, { atlas, pack: () => pack, session: () => session, heading: () => player.state().headingDeg });
+plan.onUnits = u => editor.setUnits(u);
 const panel = new Panel(app, editor, {
   askPin: () => session.pin ?? window.prompt('The atlas PIN:'),
+  openPlan: () => openPlan(),
   role: () => session.role,
   caps
 });
@@ -742,6 +755,7 @@ function loop() {
     player.update(dt);
     editor.frame();
     imports.tick();
+    measure.render(camera, renderer.domElement.clientWidth, renderer.domElement.clientHeight);
     const p = player.position;
     terrain.update(p.x, p.z, FINE);
     vegetation.update(p.x, p.z, { radius: PLANTED.radius, keepOut: keepOut(), density: plantDensity, exclude: packRing(), wet: context.creekLines });
@@ -867,7 +881,7 @@ const api = {
   },
   /** the foundation walls the placements imply: the tallest, which floor, and how much wall in all */
   footings: () => footing ? { maxDrop: footing.maxDrop, worst: footing.worst, edges: footing.edges, lengthM: footing.lengthM, solids: footing.solids.length, drawn: !!footing.mesh, byStructure: footing.byStructure } : null,
-  THREE, player, frame, field, terrain, vegetation, structures, today, build, sky, scene, camera, renderer, stick, editor, grid, inspect, magic, studio, looks, imports, photo3d,
+  THREE, player, frame, field, terrain, vegetation, structures, today, build, sky, scene, camera, renderer, stick, editor, grid, inspect, magic, studio, looks, imports, photo3d, measure, plan, openPlan,
   get ready() { return ready; },
   get pack() { return pack; },
   get session() { return session; },

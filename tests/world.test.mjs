@@ -11,8 +11,11 @@ import { height, ORIGIN, PACK_TREES, PACK_STANDING, removedByEdits, PACK_HOUSE, 
 
 const PORT = 5181;
 const BASE = `http://localhost:${PORT}`;
-const R = 6378137, D2R = Math.PI / 180;
-const MX = R * Math.cos(ORIGIN.lat * D2R) * D2R, MY = R * D2R;
+const D2R = Math.PI / 180;
+// true metres: the WGS84 ellipsoid's two radii at the origin, as the world uses them (src/world/geo.ts)
+const E2 = (1 / 298.257223563) * (2 - 1 / 298.257223563), SIN = Math.sin(ORIGIN.lat * D2R), W84 = 1 - E2 * SIN * SIN;
+const MX = 6378137 / Math.sqrt(W84) * Math.cos(ORIGIN.lat * D2R) * D2R;
+const MY = 6378137 * (1 - E2) / (W84 * Math.sqrt(W84)) * D2R;
 
 /** the fixture surface itself: every assertion below is checked against this, not against pixels */
 const truth = (lng, lat) => height(lng, lat);
@@ -1068,7 +1071,7 @@ const readPart = await page.evaluate(({ wallId }) => {
   return { hidden: card.hidden, text: card.textContent };
 }, { wallId: room.wallId });
 check('read: a click on a wall says what it is — the structure, its length, height and material, and that the owner built it',
-  !readPart.hidden && /the studio · wall/.test(readPart.text) && /3\.5 m high/.test(readPart.text) && /stone/.test(readPart.text) && /one of 3 parts/.test(readPart.text) && /built by the owner/.test(readPart.text), readPart);
+  !readPart.hidden && /the studio · wall/.test(readPart.text) && /(3\.5 m|11′ 6″) high/.test(readPart.text) && /stone/.test(readPart.text) && /one of 3 parts/.test(readPart.text) && /built by the owner/.test(readPart.text), readPart);
 // the parts go to the atlas with everything else
 const savedParts = await page.evaluate(async () => {
   const w = window.world;
@@ -1837,6 +1840,112 @@ check('bring: a photo without a PIN is refused before anything is spent', bring.
 check('bring: a photo goes to the atlas as a small JPEG, comes back as a model, and stands where it was put at the height asked',
   bring.photo.stage === 'done' && bring.photo.jpeg === true && bring.photo.calls.includes('/api/image3d/part') && Math.abs(bring.photo.h - 1.5) < 0.02 && Math.abs(bring.photo.y - bring.photo.ground) < 0.05 && bring.photo.pending === 0, bring.photo);
 check('bring: a file dropped on the world lands, and everything brought in can be taken away again', bring.dropped === 1 && bring.left === 0, { dropped: bring.dropped, left: bring.left });
+
+// ---- measuring: true lengths, typed lengths, square footage, the plan, the tape --------------------
+// A wall typed side by side — 40', 62'6", 40', closed — is exactly that long on the ground; the
+// building inside it is measured to the outside face of the wall; asked for 5,000 sq ft it becomes
+// 5,000 sq ft with its walls still a foot thick; its plan draws the dimensions and the setback to the
+// surveyed line; and the tape reads the distance between two clicks.
+const meas = await page.evaluate(async ([S, W0]) => {
+  const w = window.world, ed = w.editor, T = w.THREE;
+  const FT = 0.3048;
+  w.setSession({ role: 'admin', pin: '4242' });
+  ed.setActive(true);
+  ed.setUnits('ft');
+  const out = {};
+  out.truth = ed.surveyCheck();
+  // walls drawn by typing
+  ed.setTool('wall');
+  ed.wall = { height: 3, thick: FT, material: 'plaster', smooth: false, base: 0, structure: 'typed house' };
+  ed.drawing = [S];
+  const s0 = w.frame.toWorld(S[0], S[1]);
+  const cur = (x, z) => { ed.cursor = new T.Vector3(x, w.field.atOr(...Object.values(w.frame.toLngLat(x, z)), 0), z); };
+  cur(s0.x + 30, s0.z);                        // east
+  ed.typeLength(`40'`);
+  let p = w.frame.toWorld(...ed.drawing[1]);
+  cur(p.x, p.z + 30);                          // south
+  ed.typeLength(`62'6"`);
+  out.draftTexts = w.measure.texts('draft');
+  p = w.frame.toWorld(...ed.drawing[2]);
+  cur(p.x - 30, p.z);                          // west
+  ed.typeLength('40');                         // a bare number, in feet
+  ed.drawing.push(ed.drawing[0]);
+  ed.finishLine();
+  const wall = ed.buildParts('typed house').find(f => f.properties.kind === 'wall');
+  const c = wall.geometry.coordinates.map(([lng, lat]) => w.frame.toWorld(lng, lat));
+  out.sides = c.slice(1).map((q, i) => +Math.hypot(q.x - c[i].x, q.z - c[i].z).toFixed(4));
+  // the same sides measured straight from longitude and latitude on the ellipsoid
+  const e2 = (1 / 298.257223563) * (2 - 1 / 298.257223563);
+  const onEarth = (a, b) => { const lat = (a[1] + b[1]) / 2 * Math.PI / 180, sn = Math.sin(lat), ww = 1 - e2 * sn * sn; const mx = 6378137 / Math.sqrt(ww) * Math.cos(lat) * Math.PI / 180, my = 6378137 * (1 - e2) / (ww * Math.sqrt(ww)) * Math.PI / 180; return Math.hypot((b[0] - a[0]) * mx, (b[1] - a[1]) * my); };
+  const g = wall.geometry.coordinates;
+  out.sidesOnEarth = g.slice(1).map((q, i) => +onEarth(g[i], q).toFixed(4));
+  // a floor inside it, then the building's size
+  ed.addFloor(g.slice(0, -1), { level: 0, thick: 0.2, material: 'wood', structure: 'typed house' });
+  const size = ed.buildingSize('typed house');
+  out.size = { gross: size.grossM2, net: size.netM2, levels: size.levels.length, w: size.width, d: size.depth };
+  // the card shows it
+  const wallId = String(wall.properties.id);
+  ed.select({ kind: 'build', id: wallId, feature: ed.buildFeature(wallId), object: w.build.group.getObjectByName(`build:${wallId}`), point: new T.Vector3(s0.x, 0, s0.z) });
+  out.card = document.querySelector('.edit-panel .ep-size')?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+  out.selTexts = w.measure.texts('sel');
+  // made 5,000 sq ft
+  ed.resizeBuilding('typed house', 5000 * FT * FT);
+  const after = ed.buildingSize('typed house');
+  const wall2 = ed.buildParts('typed house').find(f => f.properties.kind === 'wall');
+  out.resized = { sqft: after.grossM2 / (FT * FT), thick: wall2.properties.thick_m };
+  // the plan
+  const w2 = String(wall2.properties.id);
+  ed.select({ kind: 'build', id: w2, feature: ed.buildFeature(w2), object: w.build.group.getObjectByName(`build:${w2}`), point: new T.Vector3(s0.x, 0, s0.z) });
+  w.openPlan();
+  const floorSvg = w.plan.svg('floor'), siteSvg = w.plan.svg('site');
+  out.plan = { open: w.plan.isOpen, svg: floorSvg.startsWith('<svg'), overall: (floorSvg.match(/overall/g) || []).length, dims: (floorSvg.match(/′/g) || []).length, sqft: /5,000 SQ FT/.test(floorSvg), setback: /setback/.test(siteSvg), boundary: /stroke-dasharray/.test(siteSvg), summary: document.querySelector('.plan-modal .pl-sum')?.textContent?.replace(/\s+/g, ' ').trim() ?? '' };
+  w.plan.close();
+  // the setback, worked out by hand: the parcel's west line is 80 m west of the origin
+  const sb = ed.setback(after.footprint);
+  out.setback = sb ? sb.d : null;
+  // metres first, then back
+  ed.setUnits('m');
+  out.metric = ed.describeBuild(ed.buildFeature(w2));
+  ed.setUnits('ft');
+  // the tape: two clicks on the ground ahead, read back
+  ed.setTool('tape');
+  const eye = w.player.eye;
+  const fwd = new T.Vector3(eye.direction.x, 0, eye.direction.z).normalize();
+  const onGround = d => { const q = eye.position.clone().add(fwd.clone().multiplyScalar(d)); const ll = w.frame.toLngLat(q.x, q.z); q.y = w.field.atOr(ll.lng, ll.lat, 0); return q; };
+  const screen = v => { const r = w.renderer.domElement.getBoundingClientRect(); const n = v.clone().project(w.camera); return [r.left + (n.x + 1) / 2 * r.width, r.top + (1 - n.y) / 2 * r.height]; };
+  const A = onGround(10), B = onGround(18);
+  ed.click(...screen(A)); ed.click(...screen(B));
+  const tape = ed.tapes[0];
+  out.tape = tape ? { level: Math.hypot(tape.b.x - tape.a.x, tape.b.z - tape.a.z), text: ed.tapeText(tape.a, tape.b), labels: w.measure.texts('tape') } : null;
+  ed.clearTapes();
+  // put things back
+  ed.removeStructureParts('typed house');
+  ed.select(null);
+  ed.setTool('select');
+  ed.setActive(false);
+  w.setSession({ role: 'member', pin: null });
+  return out;
+}, [at(-60, -30), null]);
+{
+  const FT = 0.3048;
+  const want = [40 * FT, 62.5 * FT, 40 * FT];
+  const sidesOk = want.every((L, i) => Math.abs(meas.sides[i] - L) < 0.001 && Math.abs(meas.sidesOnEarth[i] - L) < 0.001);
+  check('measure: a wall typed 40\', 62\'6", 40 is exactly that long — in the world and measured on the ellipsoid from its coordinates',
+    sidesOk, { sides: meas.sides, onEarth: meas.sidesOnEarth, want: want.map(x => +x.toFixed(4)) });
+  check('measure: while it is drawn, each side is labelled in feet and inches', meas.draftTexts.includes('40′ 0″') && meas.draftTexts.includes('62′ 6″'), meas.draftTexts);
+  const gross = (40 * FT + FT) * (62.5 * FT + FT), net = (40 * FT - FT) * (62.5 * FT - FT);
+  check('measure: the building is measured to the outside face of its foot-thick wall (gross) and to the inside face (net)',
+    Math.abs(meas.size.gross - gross) < 0.01 && Math.abs(meas.size.net - net) < 0.01 && meas.size.levels === 1, { ...meas.size, wantGross: gross, wantNet: net });
+  check('measure: the part card shows the square footage and the plan button', /2,60[34] sq ft/.test(meas.card) && /floor plan/.test(meas.card), meas.card);
+  check('measure: a selected wall shows the length of each side in the world', meas.selTexts.includes('40′ 0″') && meas.selTexts.includes('62′ 6″'), meas.selTexts);
+  check('measure: asked for 5,000 sq ft it becomes 5,000 sq ft, its walls still a foot thick', Math.abs(meas.resized.sqft - 5000) < 0.5 && Math.abs(meas.resized.thick - FT) < 1e-9, meas.resized);
+  check('measure: the plan draws the walls with their dimensions, the overall size and the square footage; the site plan the surveyed line and the setback',
+    meas.plan.open && meas.plan.svg && meas.plan.overall === 2 && meas.plan.dims >= 6 && meas.plan.sqft && meas.plan.setback && meas.plan.boundary, meas.plan);
+  check('measure: the setback is the distance to the nearest property line', meas.setback > 5 && meas.setback < 30, { setbackM: meas.setback });
+  check('measure: the world is checked against the survey — both fixture calls within a hundredth of a foot', meas.truth && meas.truth.lines === 2 && meas.truth.worstFt < 0.01, meas.truth);
+  check('measure: switched to metres, lengths read in metres first', / m long/.test(meas.metric) && !/′/.test(meas.metric), meas.metric);
+  check('measure: the tape laid by two clicks on the ground reads the distance between them', !!meas.tape && Math.abs(meas.tape.level - 8) < 0.3 && meas.tape.labels.length === 1, meas.tape);
+}
 
 // ---- nothing threw ------------------------------------------------------------------------------
 const real = errs.filter(e => !/WebGL|GL_INVALID|swiftshader|GPU stall|Failed to load resource/i.test(e));

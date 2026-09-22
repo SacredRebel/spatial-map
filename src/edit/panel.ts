@@ -8,12 +8,14 @@ import type { Caps, Role } from '../world/roles';
 import { MATERIAL_NAMES, ROOF_FORMS, STRUCTURES, INFILLS, INSULATIONS, ROOF_FINISHES, type Opening } from '../world/build';
 import { ORGANIC_FORMS, type OrganicSpec, type Quantities } from '../world/organic';
 import { ACCEPT, megabytes, type ImportItem } from '../world/imports';
+import { fmtLen, fmtArea, parseArea, levelName, type BuildingSize } from './measure';
 
 const esc = (s: unknown) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
 const FT = 0.3048;
 
 const TOOLS: { id: Tool; key: string; label: string; hint: string; needs?: keyof Caps; group?: string }[] = [
   { id: 'select', key: '1', label: '↖ select', hint: 'click a tree, a post, a marker, a line, a block, a wall · drag a block or a wall to move it' },
+  { id: 'tape', key: 'T', label: '📏 tape', hint: 'click where the tape starts, then where it ends — on the ground, a wall, a roof · it reads the level distance, the rise and the slope' },
   { id: 'marker', key: '2', label: '📍 marker', hint: 'click the ground to pin a name there' },
   { id: 'tree', key: '3', label: '🌳 tree', hint: 'click the ground to plant a tree that is there' },
   { id: 'fence', key: '4', label: '⌇ fence', hint: 'click along the line · Enter to finish' },
@@ -78,6 +80,8 @@ const materialOptions = (chosen: string) => MATERIAL_NAMES.map(m => `<option val
 
 export interface PanelOpts {
   askPin: () => string | null;
+  /** the floor plan of what is selected */
+  openPlan?: () => void;
   role: () => Role;
   caps: () => Caps;
 }
@@ -99,7 +103,8 @@ export class Panel {
     if (!e.active) return;
     const caps = this.o.caps();
     const busy = e.moving ? `<div class="ep-note">put <b>${esc(e.moving.name)}</b> down: click the ground · Esc cancels</div>`
-      : e.drawing.length ? `<div class="ep-note">${e.drawing.length} point${e.drawing.length === 1 ? '' : 's'} · <b>Enter</b> ${e.tool === 'zone' || e.tool === 'terrain' ? 'close the ring' : 'finish'} · <b>Backspace</b> undo point · <b>Esc</b> cancel</div>`
+      : e.drawing.length ? `<div class="ep-note">${e.drawing.length} point${e.drawing.length === 1 ? '' : 's'} · <b>Enter</b> ${e.tool === 'zone' || e.tool === 'terrain' ? 'close the ring' : 'finish'} · <b>Backspace</b> undo point · <b>Esc</b> cancel
+          <div class="ep-typed">${e.typed ? `length <b>${esc(e.typed)}</b> — <b>Enter</b> puts the next point exactly that far` : `type a length (<b>32'6"</b>, <b>9.9m</b>) + <b>Enter</b> for an exact side · hold <b>Shift</b> for square corners and round lengths`}</div></div>`
       : '';
     const save = e.lastSave ? `<div class="ep-save ${e.lastSave.ok ? 'ok' : 'bad'}">${esc(e.lastSave.message)}</div>` : '';
     const proposed = e.proposed.edits.length + e.proposed.structures.length;
@@ -107,11 +112,11 @@ export class Panel {
     const button = (t: typeof TOOLS[number]) => `<button class="ep-tool${t.id === e.tool ? ' on' : ''}" data-tool="${t.id}" title="${esc(t.hint)} (${t.key})">${t.label}</button>`;
     const building = tools.filter(t => t.group === 'build');
     this.root.innerHTML = `
-      <div class="ep-head"><b>edit</b><span>${e.unsaved} unsaved${proposed ? ` · ${proposed} proposed` : ''}</span><em class="ep-role">${esc(this.o.role())}</em><button class="ep-x" data-act="close" title="leave edit mode (B)">×</button></div>
+      <div class="ep-head"><b>edit</b><span>${e.unsaved} unsaved${proposed ? ` · ${proposed} proposed` : ''}</span><button class="ep-units" data-act="units" title="read lengths in feet or in metres first">${e.units === 'ft' ? 'ft·in' : 'm'}</button><em class="ep-role">${esc(this.o.role())}</em><button class="ep-x" data-act="close" title="leave edit mode (B)">×</button></div>
       <div class="ep-tools">${tools.filter(t => !t.group).map(button).join('')}</div>
       ${building.length ? `<div class="ep-tools ep-build"><span class="ep-group">build</span>${building.map(button).join('')}<button class="ep-tool" data-act="room" title="a floor, a closed wall with a door, and a roof, put down in one go where you stand">⌂ room…</button></div>` : ''}
       <div class="ep-hint">${esc(TOOLS.find(t => t.id === e.tool)?.hint ?? '')}</div>
-      ${e.tool === 'block' ? this.blockForm() : e.tool === 'terrain' ? this.shapeForm() : e.tool === 'zone' ? this.zoneForm() : e.tool === 'wall' ? this.wallForm() : e.tool === 'floor' ? this.floorForm() : e.tool === 'roof' ? this.roofForm() : e.tool === 'opening' ? this.openingForm() : e.tool === 'organic' ? this.organicForm() : e.tool === 'mark' ? this.markForm() : e.tool === 'bring' ? this.bringForm() : ''}
+      ${e.tool === 'tape' ? this.tapeForm() : e.tool === 'block' ? this.blockForm() : e.tool === 'terrain' ? this.shapeForm() : e.tool === 'zone' ? this.zoneForm() : e.tool === 'wall' ? this.wallForm() : e.tool === 'floor' ? this.floorForm() : e.tool === 'roof' ? this.roofForm() : e.tool === 'opening' ? this.openingForm() : e.tool === 'organic' ? this.organicForm() : e.tool === 'mark' ? this.markForm() : e.tool === 'bring' ? this.bringForm() : ''}
       ${busy}
       ${this.selection(e.selection)}
       <div class="ep-list">${this.list()}</div>
@@ -121,7 +126,8 @@ export class Panel {
         <button class="btn" data-act="download" ${e.edits.length ? '' : 'disabled'}>⤓ edits.geojson</button>
         <button class="btn gold" data-act="save" ${e.unsaved ? '' : 'disabled'}>${caps.commit ? 'save to pack…' : 'propose…'}</button>
       </div>
-      ${save}`;
+      ${save}
+      ${(() => { const t = e.surveyCheck(); return t ? `<div class="ep-true" title="each boundary line of the licensed survey, measured here from its two ends, against the distance the surveyor wrote down">✓ true to the ground: ${t.lines} survey lines within ${t.worstFt.toFixed(2)} ft</div>` : ''; })()}`;
     this.root.querySelectorAll<HTMLElement>('[data-tool]').forEach(b => b.addEventListener('click', () => e.setTool(b.dataset.tool as Tool)));
     this.root.querySelectorAll<HTMLElement>('[data-act]').forEach(b => b.addEventListener('click', () => this.act(b.dataset.act!)));
     this.root.querySelectorAll<HTMLInputElement>('[data-block]').forEach(i => i.addEventListener('change', () => {
@@ -171,6 +177,9 @@ export class Panel {
       i.addEventListener('change', () => { const [k, v] = readOrg(i); (e.organic as unknown as Record<string, unknown>)[k] = v; this.render(); });
     });
     this.root.querySelector<HTMLInputElement>('[data-org-name]')?.addEventListener('change', ev => { e.organicName = (ev.target as HTMLInputElement).value.trim(); });
+    this.root.querySelector<HTMLInputElement>('[data-org-target]')?.addEventListener('change', ev => { const v = (ev.target as HTMLInputElement).value; e.organicTarget = v.trim() ? parseArea(v, e.units) ?? 0 : 0; this.render(); });
+    const sizeIn = this.root.querySelector<HTMLInputElement>('[data-size-target]');
+    sizeIn?.addEventListener('keydown', ev => { if (ev.key === 'Enter') this.act('resize'); });
     this.root.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-org]').forEach(i => {
       i.addEventListener('input', () => { const o = i.parentElement?.querySelector('output'); if (o && i instanceof HTMLInputElement && i.type === 'range') o.textContent = i.value; });
       i.addEventListener('change', () => {
@@ -251,6 +260,34 @@ export class Panel {
       ${can ? `<div class="ep-row"><button class="btn" data-act="imp-dl" title="save the file itself">⤓ file</button><button class="btn" data-act="remove">✕ remove</button></div>
       <div class="muted">drag it across the ground to move it · [ ] turn · + − lift${scan ? ' · a scan is picked by the ring at its middle' : ''}</div>` : ''}
     </div>`;
+  }
+
+  private tapeForm(): string {
+    const e = this.editor;
+    const list = e.tapes.map((t, i) => `<div class="ep-item">${i + 1}. ${esc(e.tapeText(t.a, t.b))}</div>`).join('');
+    return `<div class="ep-form">
+      ${e.tapeStart ? '<div class="ep-note">now click the other end · Esc drops it</div>' : ''}
+      ${list || '<div class="muted">no tapes yet</div>'}
+      ${e.tapes.length ? '<button class="btn" data-act="clear-tapes">clear tapes</button>' : ''}
+      <small>ends pull onto the corners of walls and floors within 30 cm · the metres are true (WGS84), checked against the survey</small>
+    </div>`;
+  }
+
+  /** a building's size: square footage the way an appraiser counts it, where it stands, and a way to make it a given size */
+  private sizeCard(name: string, s: BuildingSize | null): string {
+    const e = this.editor, u = e.units;
+    if (!s) return '';
+    const setback = e.setback(s.footprint);
+    const can = this.o.caps().place;
+    const lv = s.levels.length > 1 ? `<div class="ep-levels">${s.levels.map(l => `<div>${levelName(l.level, u)}: ${fmtArea(l.grossM2, u, false)}${l.counted ? '' : ' <small>(ceiling under 7 ft — not counted)</small>'}</div>`).join('')}</div>` : '';
+    return `<div class="ep-size"><div class="ep-size-h">📐 <b>${esc(name)}</b></div>
+      <div class="ep-big">${fmtArea(s.grossM2, u)}</div>
+      <div>gross, to the outside of the walls${s.levels.some(l => l.from === 'walls') ? ` · ${fmtArea(s.netM2, u, false)} inside` : ''}</div>
+      <div>${s.levels.length} level${s.levels.length === 1 ? '' : 's'} · footprint ${fmtArea(s.footprintM2, u, false)} · ${fmtLen(s.width, u, false)} × ${fmtLen(s.depth, u, false)}</div>
+      ${lv}
+      ${!setback ? '' : setback.inside ? `<div>${fmtLen(setback.d, u, false)} to the nearest property line</div>` : `<div class="ep-save bad">⚠ not inside the property line — ${fmtLen(setback.d, u, false)} from it</div>`}
+      ${can ? `<label class="ep-inline">make it <input data-size-target placeholder="${Math.round(u === 'ft' ? s.grossM2 / (FT * FT) : s.grossM2)}"> ${u === 'ft' ? 'sq ft' : 'm²'} <button class="btn" data-act="resize">resize</button></label>` : ''}
+      <div class="ep-row"><button class="btn gold" data-act="plan" title="the floor plan and the site plan, dimensioned (P)">📐 floor plan</button></div></div>`;
   }
 
   private blockForm(): string {
@@ -334,6 +371,7 @@ export class Panel {
     const e = this.editor;
     return `<div class="ep-form">
       <label>name <input data-org-name value="${esc(e.organicName)}" placeholder="the oak leaf house"></label>
+      <label>size <input data-org-target value="${e.organicTarget ? Math.round(e.units === 'ft' ? e.organicTarget / (FT * FT) : e.organicTarget) : ''}" placeholder="as drawn"> ${e.units === 'ft' ? 'sq ft' : 'm²'} gross</label>
       ${organicControls(e.organic, 'data-org-next')}
       ${e.lastOrganicWhy ? `<div class="ep-save bad">${esc(e.lastOrganicWhy)}</div>` : ''}
       <small>the whole building, eave included, stays inside the line you draw · select any part afterwards to reshape it with these same sliders</small>
@@ -380,6 +418,8 @@ export class Panel {
     const org = pr.structure ? this.editor.organicOf(String(pr.structure)) : null;
     if (org) body += `<div class="ep-orghead">🌿 <b>${esc(pr.structure)}</b> — organic · reshape it:</div>${organicControls(org.spec, 'data-org', dis)}${quantities(this.editor.organicQuantities(String(pr.structure)))}${(() => { const n = this.editor.treesInside(String(pr.structure)); return n ? `<div class="ep-save bad">⚠ ${n} recorded tree${n === 1 ? '' : 's'} stand${n === 1 ? 's' : ''} inside this footprint. Coast live oaks are protected in Ventura County — move the building, or mark a tree gone only if it really can go.</div>` : ''; })()}`;
     const structure = pr.structure ? this.editor.buildParts(String(pr.structure)).length : 0;
+    if (pr.structure) body += this.sizeCard(String(pr.structure), this.editor.buildingSize(String(pr.structure)));
+    else if (kind === 'floor' || kind === 'wall') body += `<div class="ep-row"><button class="btn" data-act="plan" title="the plan of this part (P)">📐 plan</button></div><div class="muted">give it a name in "part of" to measure the whole building</div>`;
     const acts = can ? `<div class="ep-row"><button class="btn" data-act="rot-" title="turn 15° left ([)">↺ 15°</button><button class="btn" data-act="rot+" title="turn 15° right (])">↻ 15°</button><button class="btn" data-act="remove">✕ take down</button>${structure > 1 ? `<button class="btn" data-act="remove-structure" title="every part of ${esc(pr.structure)}">✕ all ${structure} parts</button>` : ''}</div>
       <div class="muted">drag it across the ground to move it · it snaps to the half metre</div>` : '';
     return `${head}${body}${acts}</div>`;
@@ -412,9 +452,12 @@ export class Panel {
         const d = this.editor.dimensions(s);
         const can = this.o.caps().place;
         const what = s.status === 'massing' ? 'block' : s.status === 'model' ? 'model' : 'reserved site';
-        const size = s.status === 'model' ? '' : `${d.w.toFixed(1)} × ${d.d.toFixed(1)} m · ${Math.round(d.w / FT)} × ${Math.round(d.d / FT)} ft`;
+        const size = s.status === 'model' ? '' : `${fmtLen(d.w, this.editor.units, false)} × ${fmtLen(d.d, this.editor.units, false)} · ${fmtArea(d.w * d.d, this.editor.units)}`;
+        const pi = s.status === 'model' ? this.editor.planInput() : null;
+        const rooms = pi?.size ? `<div class="ep-dim">≈ ${fmtArea(pi.size.grossM2, this.editor.units)} of rooms over ${pi.size.levels.length} level${pi.size.levels.length === 1 ? '' : 's'}</div>` : '';
         return `<div class="ep-sel"><label class="ep-inline">name <input data-name value="${esc(s.name)}" ${can ? '' : 'disabled'}></label> <small>${what} · ${esc(s.mode)}</small>
-          ${size ? `<div class="ep-dim">${size}</div>` : ''}
+          ${size ? `<div class="ep-dim">${size}</div>` : ''}${rooms}
+          <div class="ep-row"><button class="btn gold" data-act="plan" title="the floor plan and the site plan (P)">📐 plan</button></div>
           ${s.status === 'massing' ? `<label class="ep-inline">height <input data-height type="number" step="0.5" min="0.5" max="90" value="${d.h.toFixed(1)}" ${can ? '' : 'disabled'}> m</label>` : ''}
           ${can ? `<div class="ep-row"><button class="btn" data-act="rot-" title="turn 15° left ([)">↺ 15°</button><button class="btn" data-act="rot+" title="turn 15° right (])">↻ 15°</button>${s.status === 'model' ? `<button class="btn" data-act="up" title="raise 0.25 m (+)">▲</button><button class="btn" data-act="down" title="lower 0.25 m (−)">▼</button>` : ''}<button class="btn" data-act="remove">✕ remove</button></div>
           <div class="muted">drag it across the ground to move it · it snaps to the half metre</div>` : ''}</div>`;
@@ -472,6 +515,16 @@ export class Panel {
     const s = e.selection;
     switch (a) {
       case 'close': e.setActive(false); break;
+      case 'units': e.setUnits(e.units === 'ft' ? 'm' : 'ft'); break;
+      case 'plan': this.o.openPlan?.(); break;
+      case 'clear-tapes': e.clearTapes(); break;
+      case 'resize': {
+        const v = this.root.querySelector<HTMLInputElement>('[data-size-target]')?.value ?? '';
+        const m2 = parseArea(v, e.units);
+        const name = s?.kind === 'build' ? String(s.feature.properties.structure ?? '') : '';
+        if (m2 && name) e.resizeBuilding(name, m2);
+        break;
+      }
       case 'undo': e.undo(); break;
       case 'grid': e.toggleGrid(); break;
       case 'download': e.download(); break;
